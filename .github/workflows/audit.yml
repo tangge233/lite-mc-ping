@@ -5,6 +5,10 @@ on:
     # Mondays 00:00 UTC
     - cron: "0 0 * * 1"
   workflow_dispatch:
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
 
 jobs:
   audit:
