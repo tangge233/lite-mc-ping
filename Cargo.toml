@@ -5,6 +5,7 @@ edition = "2024"
 description = "Minimal async Minecraft Java Edition (1.7+) server list ping with SRV resolution and optional latency measurement"
 license = "MIT"
 authors = ["tangge233 <tangge233@qq.com>"]
+repository = "https://github.com/tangge233/lite-mc-ping"
 keywords = ["minecraft", "ping", "server-list-ping"]
 categories = ["network-programming"]
 
