@@ -526,6 +526,7 @@ name = "lite-mc-ping"
 version = "0.1.0"
 dependencies = [
  "hickory-resolver",
+ "rand",
  "serde",
  "serde_json",
  "thiserror",

@@ -105,7 +105,7 @@ pub async fn resolve_server_address_with_options(
     // Reuse the process-wide resolver (shared DNS cache); on init failure or
     // when there is no usable SRV record, connect directly.
     if let Some(resolver) = srv::shared_resolver()
-        && let Some(record) = srv::resolve_srv(resolver, host, &mut *srv::rng()).await?
+        && let Some(record) = srv::resolve_srv(resolver, host, &mut rand::rng()).await?
     {
         return Ok(ResolvedAddress {
             host: record.target,

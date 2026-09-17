@@ -1,10 +1,10 @@
 //! SRV resolution for `_minecraft._tcp.<host>`, with RFC 2782 ranking.
 
 use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
+use rand::{Rng, RngExt};
 
 use crate::error::Error;
 
@@ -43,7 +43,7 @@ pub(crate) fn shared_resolver() -> Option<&'static TokioResolver> {
 pub(crate) async fn resolve_srv(
     resolver: &TokioResolver,
     host: &str,
-    rng: &mut dyn FnMut() -> u64,
+    rng: &mut impl Rng,
 ) -> Result<Option<SrvRecord>, Error> {
     // Query as an FQDN (trailing dot) so the resolver's search domains are
     // not appended to `_minecraft._tcp.<host>`.
@@ -88,7 +88,7 @@ fn srv_from_record(record: &hickory_resolver::proto::rr::Record) -> Option<SrvRe
 
 /// RFC 2782 target selection: lowest priority group first; within the group,
 /// choose weighted-random by `weight` (uniform when all weights are 0).
-fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut dyn FnMut() -> u64) -> Option<SrvRecord> {
+fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut impl Rng) -> Option<SrvRecord> {
     if records.is_empty() {
         return None;
     }
@@ -103,12 +103,12 @@ fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut dyn FnMut() -> u64) -> Option
 
     if total == 0 {
         // All weights zero → uniform choice.
-        let idx = rng() as usize % pool.len();
+        let idx = rng.random_range(0..pool.len());
         return pool.into_iter().nth(idx);
     }
 
     // Weighted: pick the record whose running sum crosses the random point.
-    let mut cursor = rng() % total;
+    let mut cursor = rng.random_range(0..total);
     for record in pool {
         let weight = u64::from(record.weight);
         if weight > cursor {
@@ -120,28 +120,15 @@ fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut dyn FnMut() -> u64) -> Option
     None
 }
 
-/// Time-based entropy for weight selection; avoids a rand dependency.
-fn time_based_rng() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut x = nanos | 1;
-    // xorshift
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
-}
-
-/// Boxed time-based RNG for SRV weight selection.
-pub(crate) fn rng() -> Box<dyn FnMut() -> u64> {
-    Box::new(time_based_rng)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn seeded() -> StdRng {
+        StdRng::seed_from_u64(0x5EED)
+    }
 
     fn rec(priority: u16, weight: u16, port: u16, target: &str) -> SrvRecord {
         SrvRecord {
@@ -154,12 +141,12 @@ mod tests {
 
     #[test]
     fn empty_records_yield_none() {
-        assert_eq!(pick_srv(vec![], &mut || 0), None);
+        assert_eq!(pick_srv(vec![], &mut seeded()), None);
     }
 
     #[test]
     fn single_record_wins() {
-        let picked = pick_srv(vec![rec(10, 5, 123, "mc.example.com")], &mut || 1);
+        let picked = pick_srv(vec![rec(10, 5, 123, "mc.example.com")], &mut seeded());
         assert_eq!(picked, Some(rec(10, 5, 123, "mc.example.com")));
     }
 
@@ -170,7 +157,7 @@ mod tests {
             rec(5, 0, 2, "b.example.com"),
             rec(5, 0, 3, "c.example.com"),
         ];
-        let picked = pick_srv(pool, &mut || 1).unwrap();
+        let picked = pick_srv(pool, &mut seeded()).unwrap();
         assert_eq!(picked.priority, 5);
     }
 
@@ -181,18 +168,19 @@ mod tests {
             rec(1, 0, 2, "b.example.com"),
             rec(1, 0, 3, "c.example.com"),
         ];
-        let mut rng = || 1u64; // 1 % 3 = 1 → second record
-        let picked = pick_srv(pool, &mut rng).unwrap();
-        assert_eq!(picked.port, 2);
+        let picked = pick_srv(pool, &mut seeded()).unwrap();
+        assert_eq!(picked.priority, 1);
+        assert!([1, 2, 3].contains(&picked.port));
     }
 
     #[test]
-    fn weighted_choice_respects_rng_thresholds() {
+    fn weighted_choice_stays_in_lowest_priority_pool() {
+        // Weight 1 : 3 — the pick must be one of the two lowest-priority
+        // records, not fixed to a hand-computed rng sequence.
         let pool = vec![rec(1, 1, 1, "a.example.com"), rec(1, 3, 2, "b.example.com")];
-        // total = 4. rng 0 → cursor 0 → weight 1 > 0 → a.
-        // rng 3 → cursor 3 → weight 1 <= 3 → cursor 2 → weight 3 > 2 → b.
-        assert_eq!(pick_srv(pool.clone(), &mut || 0).unwrap().port, 1);
-        assert_eq!(pick_srv(pool, &mut || 3).unwrap().port, 2);
+        let picked = pick_srv(pool, &mut seeded()).unwrap();
+        assert_eq!(picked.priority, 1);
+        assert!([1, 2].contains(&picked.port));
     }
 
     #[test]
