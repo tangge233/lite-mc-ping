@@ -1,6 +1,6 @@
 //! SRV resolution for `_minecraft._tcp.<host>`, with RFC 2782 ranking.
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hickory_resolver::TokioResolver;
@@ -28,14 +28,12 @@ pub(crate) struct SrvRecord {
 /// Returns `None` when the system resolver config cannot be read. The failure
 /// is cached (not retried), and callers fall back to a direct connection.
 pub(crate) fn shared_resolver() -> Option<&'static TokioResolver> {
-    static RESOLVER: OnceLock<Option<TokioResolver>> = OnceLock::new();
-    RESOLVER
-        .get_or_init(|| {
-            TokioResolver::builder_tokio()
-                .ok()
-                .and_then(|builder| builder.build().ok())
-        })
-        .as_ref()
+    static RESOLVER: LazyLock<Option<TokioResolver>> = LazyLock::new(|| {
+        TokioResolver::builder_tokio()
+            .ok()
+            .and_then(|builder| builder.build().ok())
+    });
+    RESOLVER.as_ref()
 }
 
 /// Query `_minecraft._tcp.<host>` and pick one target per RFC 2782.

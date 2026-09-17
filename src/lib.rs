@@ -65,7 +65,7 @@ mod models;
 mod protocol;
 mod srv;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::time::Instant;
 
 use tokio::io::{AsyncWriteExt, BufStream};
@@ -140,13 +140,17 @@ async fn ping_inner(
     original_host: &str,
     options: &PingOptions,
 ) -> Result<PingResult, Error> {
-    let mut stream = BufStream::new(
-        TcpStream::connect(SocketAddr::from((
-            resolve_ip(resolved).await?,
-            resolved.port,
-        )))
-        .await?,
-    );
+    // Wildcard SRV targets ("*.example.com") cannot be resolved to a host.
+    if resolved.host.contains('*') {
+        return Err(Error::Dns(format!(
+            "SRV target {:?} is a wildcard and cannot be connected to",
+            resolved.host
+        )));
+    }
+    // Connecting by hostname lets tokio resolve A/AAAA via the OS and try
+    // every address in order, giving multi-address targets automatic failover.
+    let mut stream =
+        BufStream::new(TcpStream::connect((resolved.host.as_str(), resolved.port)).await?);
     stream.get_ref().set_nodelay(true)?;
 
     // Handshake: carry the *original* hostname, connect to the SRV port.
@@ -178,26 +182,4 @@ async fn ping_inner(
     }
 
     Ok(PingResult { status, latency })
-}
-
-/// Resolve the target hostname to an IP for the TCP connection. Wildcard SRV
-/// targets (`*.`) cannot be connected to directly.
-async fn resolve_ip(resolved: &ResolvedAddress) -> Result<std::net::IpAddr, Error> {
-    if let Ok(ip) = resolved.host.parse::<IpAddr>() {
-        return Ok(ip);
-    }
-    if resolved.host.contains('*') {
-        return Err(Error::Dns(format!(
-            "SRV target {:?} is a wildcard and cannot be connected to",
-            resolved.host
-        )));
-    }
-    // Resolve via the OS (hickory handles SRV; A/AAAA goes through std).
-    let ips = tokio::net::lookup_host((resolved.host.as_str(), resolved.port))
-        .await
-        .map_err(|e| Error::Dns(e.to_string()))?;
-    ips.into_iter()
-        .next()
-        .map(|a| a.ip())
-        .ok_or_else(|| Error::Dns(format!("no address for {}", resolved.host)))
 }

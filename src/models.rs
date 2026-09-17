@@ -41,29 +41,29 @@ impl FromStr for ServerAddress {
             return Err("empty address".into());
         }
         // Bracket form handles IPv6 explicitly: "[::1]:25565" or "[::1]".
-        if let Some(rest) = s.strip_prefix('[') {
-            let (host, tail) = rest
-                .split_once(']')
-                .ok_or_else(|| format!("missing ']' in {s:?}"))?;
-            let port = match tail.strip_prefix(':') {
-                Some(p) if !p.is_empty() => p.parse().map_err(|_| format!("invalid port {p:?}"))?,
-                _ => DEFAULT_PORT,
-            };
-            return Ok(ServerAddress::new(host, port));
-        }
-        // A bare string that is already an IP (e.g. "::1") → default port.
-        if let Ok(ip) = s.parse::<IpAddr>() {
-            return Ok(ServerAddress::new(ip.to_string(), DEFAULT_PORT));
-        }
-        // "host" or "host:port" — split on the last colon (hosts may contain
-        // colons only in IPv6, already handled above).
-        match s.rsplit_once(':') {
-            Some((host, p)) if !host.is_empty() && !p.is_empty() => {
-                let port = p.parse().map_err(|_| format!("invalid port {p:?}"))?;
-                Ok(ServerAddress::new(host, port))
+        let Some(rest) = s.strip_prefix('[') else {
+            // Bare string: an IP literal (e.g. "::1") → default port, or
+            // "host" / "host:port" — split on the last colon (hosts contain
+            // colons only in IPv6, already handled above).
+            if let Ok(ip) = s.parse::<IpAddr>() {
+                return Ok(ServerAddress::new(ip.to_string(), DEFAULT_PORT));
             }
-            _ => Ok(ServerAddress::new(s, DEFAULT_PORT)),
-        }
+            return match s.rsplit_once(':') {
+                Some((host, p)) if !host.is_empty() && !p.is_empty() => {
+                    let port = p.parse().map_err(|_| format!("invalid port {p:?}"))?;
+                    Ok(ServerAddress::new(host, port))
+                }
+                _ => Ok(ServerAddress::new(s, DEFAULT_PORT)),
+            };
+        };
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("missing ']' in {s:?}"))?;
+        let port = match tail.strip_prefix(':') {
+            Some(p) if !p.is_empty() => p.parse().map_err(|_| format!("invalid port {p:?}"))?,
+            _ => DEFAULT_PORT,
+        };
+        Ok(ServerAddress::new(host, port))
     }
 }
 
@@ -123,8 +123,9 @@ pub struct PingResult {
 ///
 /// Parsed leniently: unknown fields are ignored and the optional fields below
 /// default when missing, so responses from older or modded servers still
-/// deserialize.
+/// deserialize. Non-exhaustive: the protocol evolves, new fields are expected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StatusResponse {
     pub version: Version,
     #[serde(default)]
@@ -141,6 +142,7 @@ pub struct StatusResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Version {
     /// Display name, e.g. `"1.21.4"`.
     pub name: String,
@@ -150,6 +152,7 @@ pub struct Version {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Players {
     pub max: u32,
     pub online: u32,
@@ -158,6 +161,7 @@ pub struct Players {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PlayerSample {
     pub name: String,
     /// UUID of the player, typically without dashes.

@@ -2,6 +2,7 @@
 name = "lite-mc-ping"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Minimal async Minecraft Java Edition (1.7+) server list ping with SRV resolution and optional latency measurement"
 license = "MIT"
 authors = ["tangge233 <tangge233@qq.com>"]

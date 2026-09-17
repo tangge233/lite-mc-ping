@@ -114,7 +114,7 @@ pub(crate) fn parse_status_frame(frame: &[u8]) -> Result<StatusResponse, Error> 
     if id != 0x00 {
         return Err(Error::UnexpectedPacket {
             expected: 0x00,
-            got: id as u8,
+            got: u8::try_from(id).unwrap_or(0xFF),
         });
     }
     let json_len = read_varint(&mut cur)? as usize;
@@ -138,7 +138,7 @@ pub(crate) fn parse_pong_frame(frame: &[u8]) -> Result<i64, Error> {
     if id != 0x01 {
         return Err(Error::UnexpectedPacket {
             expected: 0x01,
-            got: id as u8,
+            got: u8::try_from(id).unwrap_or(0xFF),
         });
     }
     let payload = &frame[cur.position() as usize..];
@@ -166,7 +166,7 @@ fn read_varint<R: Read>(reader: &mut R) -> Result<u32, Error> {
         match take.read(&mut byte) {
             Ok(0) => break,
             Ok(_) => window.push(byte[0]),
-            Err(_) => break,
+            Err(e) => return Err(Error::Malformed(format!("bad VarInt: {e}"))),
         }
         if byte[0] & 0x80 == 0 {
             break;
@@ -293,6 +293,22 @@ mod tests {
                 got: 0x02
             })
         ));
+    }
+
+    #[test]
+    fn parse_status_frame_plain_string_description() {
+        let json = br#"{"version":{"name":"1.8.9","protocol":47},"players":{"max":10,"online":0},"description":"Plain motd"}"#;
+        let mut body = Cursor::new(Vec::new());
+        body.write_unsigned_varint_32(0x00).unwrap();
+        body.write_unsigned_varint_32(json.len() as u32).unwrap();
+        std::io::Write::write_all(&mut body, json).unwrap();
+
+        let status = parse_status_frame(&body.into_inner()).unwrap();
+        assert_eq!(status.description, serde_json::json!("Plain motd"));
+        // Missing optional fields default.
+        assert_eq!(status.favicon, None);
+        assert_eq!(status.enforces_secure_chat, None);
+        assert_eq!(status.previews_chat, None);
     }
 
     #[test]
