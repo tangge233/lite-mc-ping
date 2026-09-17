@@ -44,7 +44,7 @@ impl FakeServer {
             let mut host = vec![0u8; host_len];
             std::io::Read::read_exact(&mut cursor, &mut host).unwrap();
             *host_capture_task.lock().unwrap() = Some(String::from_utf8(host).unwrap());
-            // (port + next-state would follow; the client is trusted here)
+            // (Port and next-state follow; not checked in tests.)
 
             match behavior {
                 ServerBehavior::Delay(d) => {

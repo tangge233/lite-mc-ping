@@ -17,18 +17,16 @@ pub(crate) struct SrvRecord {
     pub(crate) target: String,
 }
 
-/// The process-wide default resolver, built lazily on first SRV lookup.
+/// Process-wide default resolver, built lazily on first SRV lookup.
 ///
-/// [`TokioResolver`] is `Clone + Send + Sync` and keeps its name-server pool
-/// (`Arc<PoolContext>`) and its answer cache (a `moka` cache that is shared on
-/// clone) behind reference-counted handles, so a single instance is meant to be
-/// reused: every lookup then shares the same DNS cache. Building a resolver per
-/// ping would discard that cache and re-read the system resolver config each
-/// time.
+/// [`TokioResolver`] is `Clone + Send + Sync`; its name-server pool
+/// (`Arc<PoolContext>`) and answer cache (`moka`, shared on clone) are held
+/// behind reference-counted handles, so a single instance is designed for
+/// reuse and every lookup shares the same DNS cache. A per-call resolver would
+/// discard that cache and re-read the system config each time.
 ///
-/// Returns `None` if the system resolver configuration cannot be read; callers
-/// then fall back to connecting directly. The failure is remembered, so it is
-/// not retried on every call.
+/// Returns `None` when the system resolver config cannot be read. The failure
+/// is cached (not retried), and callers fall back to a direct connection.
 pub(crate) fn shared_resolver() -> Option<&'static TokioResolver> {
     static RESOLVER: OnceLock<Option<TokioResolver>> = OnceLock::new();
     RESOLVER
@@ -58,8 +56,8 @@ pub(crate) async fn resolve_srv(
     };
     let lookup = match resolver.srv_lookup(query.as_str()).await {
         Ok(lookup) => lookup,
-        // Anything short of a usable record — no SRV, NXDOMAIN, timeout —
-        // means "connect directly".
+        // Any lookup error (NXDOMAIN, timeout, ...) means "no SRV record";
+        // the caller then falls back to the direct address.
         Err(_) => return Ok(None),
     };
 
@@ -77,8 +75,8 @@ fn srv_from_record(record: &hickory_resolver::proto::rr::Record) -> Option<SrvRe
         RData::SRV(srv) => srv,
         _ => return None,
     };
-    // RFC 2782: a root target (".") means the service is deliberately not
-    // available at this domain — skip the record entirely.
+    // RFC 2782: a root target (".") marks the service as not available at
+    // this domain; skip such records.
     if srv.target.is_root() {
         return None;
     }
@@ -111,7 +109,7 @@ fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut dyn FnMut() -> u64) -> Option
         return pool.into_iter().nth(idx);
     }
 
-    // Weighted: walk the running sum until it crosses the random point.
+    // Weighted: pick the record whose running sum crosses the random point.
     let mut cursor = rng() % total;
     for record in pool {
         let weight = u64::from(record.weight);
@@ -120,11 +118,11 @@ fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut dyn FnMut() -> u64) -> Option
         }
         cursor -= weight;
     }
-    // Unreachable for total > 0, but keep the compiler quiet.
+    // Unreachable when total > 0; keeps the return type satisfied.
     None
 }
 
-/// Cheap entropy for weight selection without pulling in a rand crate.
+/// Time-based entropy for weight selection; avoids a rand dependency.
 fn time_based_rng() -> u64 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -138,7 +136,7 @@ fn time_based_rng() -> u64 {
     x
 }
 
-/// Helper so callers can use the time-based RNG without exposing it.
+/// Boxed time-based RNG for SRV weight selection.
 pub(crate) fn rng() -> Box<dyn FnMut() -> u64> {
     Box::new(time_based_rng)
 }

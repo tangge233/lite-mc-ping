@@ -46,18 +46,19 @@
 //!
 //! # Design notes & trade-offs (vs. `rust-mc-status`)
 //!
-//! * No proxying, no legacy (≤1.6) ping, no Forge/mod parsing — intentionally
-//!   kept to the core status flow.
-//! * The [`varint`] crate is used for VarInt codec, but its *signed* methods
-//!   are protobuf-zigzag and therefore wrong for Minecraft. Only the unsigned
-//!   methods are used, casting `i32 → u32` (so protocol version `-1` encodes
-//!   as `FF FF FF FF 0F`). The one VarInt that must be read incrementally from
-//!   the async stream (the frame-length prefix) is a tiny 5-byte-capped loop,
-//!   because the crate is `std::io`-only.
-//! * Status JSON is deserialized into strongly-typed structs
-//!   ([`StatusResponse`]) but kept lenient (unknown fields ignored, optional
-//!   fields defaulted), and `description` stays raw JSON (`serde_json::Value`)
-//!   since it is either a plain string or a Chat-component object.
+//! * No proxying, no legacy (≤1.6) ping, no Forge/mod parsing; scope is the
+//!   core status flow.
+//! * The [`varint`] crate is used for VarInt codec, with only its *unsigned*
+//!   methods: the signed methods are protobuf-zigzag, which does not match
+//!   Minecraft's two's-complement VarInt (protocol `-1` encodes as
+//!   `FF FF FF FF 0F`, via `i32 as u32`). The frame-length prefix is the only
+//!   VarInt read incrementally from the async stream and is handled by a
+//!   5-byte-capped loop, as the crate is `std::io`-only; all other VarInts
+//!   decode through the crate.
+//! * Status JSON deserializes into typed structs ([`StatusResponse`]),
+//!   leniently: unknown fields are ignored and optional fields default.
+//!   `description` remains `serde_json::Value` — it is either a plain string
+//!   or a Chat-component object.
 
 mod error;
 mod models;
@@ -179,8 +180,8 @@ async fn ping_inner(
     Ok(PingResult { status, latency })
 }
 
-/// Split the resolved hostname into an IP to connect to. SRV targets with
-/// wildcards (`*.`) cannot be connected to directly.
+/// Resolve the target hostname to an IP for the TCP connection. Wildcard SRV
+/// targets (`*.`) cannot be connected to directly.
 async fn resolve_ip(resolved: &ResolvedAddress) -> Result<std::net::IpAddr, Error> {
     if let Ok(ip) = resolved.host.parse::<IpAddr>() {
         return Ok(ip);

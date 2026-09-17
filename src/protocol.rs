@@ -10,15 +10,14 @@
 //! Server → Client: Pong        (0x01) same i64
 //! ```
 //!
-//! Every packet is prefixed with a VarInt frame length. One design note on the
-//! [`varint`] crate: its `read/write_signed_varint_32` methods use protobuf
-//! *zigzag* encoding, which does **not** match Minecraft's VarInt — Minecraft
-//! uses a plain unsigned varint of the two's-complement value (protocol
-//! version `-1` → bytes `FF FF FF FF 0F`). We therefore only use the crate's
-//! unsigned methods and cast `i32 → u32` ourselves. Also, the crate works over
-//! `std::io` only, so the single VarInt read incrementally from the async
-//! stream (the frame-length prefix) is handled by a small 5-byte-capped loop;
-//! every other VarInt is decoded through the crate.
+//! Every packet is prefixed with a VarInt frame length. Note on the [`varint`]
+//! crate: its `read/write_signed_varint_32` methods use protobuf *zigzag*
+//! encoding, which does **not** match Minecraft's VarInt — Minecraft encodes
+//! the two's-complement value as a plain unsigned varint (protocol `-1` →
+//! bytes `FF FF FF FF 0F`). Only the unsigned methods are used, casting
+//! `i32 → u32`. As the crate is `std::io`-only, the frame-length prefix (the
+//! only VarInt read incrementally from the async stream) uses a 5-byte-capped
+//! loop; every other VarInt decodes through the crate.
 
 use std::io::{Cursor, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,11 +33,10 @@ const MAX_VARINT_BYTES: u64 = VARINT_32_MAX_BYTES as u64;
 
 // ─── Encoding ────────────────────────────────────────────────────────────────
 
-/// Build the handshake packet, already framed (length prefix included).
+/// Build the handshake packet, length prefix included.
 ///
-/// `host` is the address the *user* typed — after SRV resolution the target
-/// may differ, but the handshake must still carry the original hostname so the
-/// server can do virtual hosting.
+/// `host` must be the address the caller provided, not the SRV target: the
+/// handshake carries the original hostname so the server can virtual-host.
 pub(crate) fn build_handshake(protocol: i32, host: &str, port: u16) -> Result<Vec<u8>, Error> {
     let mut body = Cursor::new(Vec::with_capacity(1 + 5 + 1 + host.len() + 2 + 1));
     body.write_unsigned_varint_32(0x00)?; // packet id: handshake
@@ -155,11 +153,11 @@ pub(crate) fn parse_pong_frame(frame: &[u8]) -> Result<i64, Error> {
 
 /// Read a VarInt from an in-memory reader via the [`varint`] crate.
 ///
-/// The crate only implements `VarintRead` for `Cursor<Vec<u8>>`, and its loop
-/// has no 5-byte cap (a 6th continuation byte would shift past 32 bits), so we
-/// first copy at most [`MAX_VARINT_BYTES`] bytes from the reader into a small
-/// window and decode that window with the crate. This never over-reads beyond
-/// the VarInt and never panics on hostile input.
+/// The crate implements `VarintRead` only for `Cursor<Vec<u8>>` and its loop
+/// has no 5-byte cap (a 6th continuation byte would shift past 32 bits).
+/// Therefore at most [`MAX_VARINT_BYTES`] bytes are copied into a window and
+/// decoded through the crate; this never over-reads past the VarInt and cannot
+/// panic on hostile input.
 fn read_varint<R: Read>(reader: &mut R) -> Result<u32, Error> {
     let mut window = Vec::with_capacity(MAX_VARINT_BYTES as usize);
     let mut take = reader.by_ref().take(MAX_VARINT_BYTES);
@@ -195,7 +193,8 @@ mod tests {
 
     #[test]
     fn handshake_bytes_match_known_good() {
-        // protocol -1 (latest) must encode as five 0xFF bytes, not zigzag!
+        // Protocol -1 (latest) must encode as five 0xFF bytes (two's
+        // complement, not zigzag).
         let frame = build_handshake(-1, "localhost", 25565).unwrap();
         let expected: &[u8] = &[
             0x13, // frame length (19)
@@ -260,8 +259,8 @@ mod tests {
 
     #[test]
     fn varint_rejects_sixth_continuation_byte() {
-        // 5 continuation bytes + one more: would exceed u32 and panic in the
-        // crate's unbounded loop if not capped.
+        // Six continuation bytes exceed u32 and would panic in the crate's
+        // unbounded loop if not capped.
         let data: &[u8] = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
         let mut cur = Cursor::new(data);
         assert!(matches!(read_varint(&mut cur), Err(Error::Malformed(_))));

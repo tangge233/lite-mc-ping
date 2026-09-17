@@ -16,8 +16,8 @@ pub const DEFAULT_PORT: u16 = 25565;
 /// [`FromStr`]; bare strings default to [`DEFAULT_PORT`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerAddress {
-    /// Hostname or IP literal. Allowed to contain underscores etc.; only
-    /// used verbatim in the handshake and for connection.
+    /// Hostname or IP literal. Unvalidated; used verbatim in the handshake
+    /// and for the TCP connection.
     pub host: String,
     /// TCP port.
     pub port: u16,
@@ -89,7 +89,7 @@ pub struct PingOptions {
     pub measure_latency: bool,
     /// Overall timeout for the whole operation.
     pub timeout: Duration,
-    /// Maximum accepted frame size, guarding against absurd declared lengths.
+    /// Maximum accepted frame size; guards against excessive declared lengths.
     pub max_frame_size: u32,
     /// Whether to attempt `_minecraft._tcp.<host>` SRV lookup. Never applied
     /// to IP literals; on lookup failure the ping falls back to the direct

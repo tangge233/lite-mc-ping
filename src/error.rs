@@ -23,7 +23,7 @@ pub enum Error {
     #[error("malformed response: {0}")]
     Malformed(String),
 
-    /// The server replied with a packet id we did not ask for.
+    /// The server sent a packet id other than the one expected.
     #[error("unexpected packet: expected {expected:#04x}, got {got:#04x}")]
     UnexpectedPacket { expected: u8, got: u8 },
 
