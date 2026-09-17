@@ -105,7 +105,7 @@ pub async fn resolve_server_address_with_options(
     // Reuse the process-wide resolver (shared DNS cache); on init failure or
     // when there is no usable SRV record, connect directly.
     if let Some(resolver) = srv::shared_resolver()
-        && let Some(record) = srv::resolve_srv(resolver, host, &mut rand::rng()).await?
+        && let Some(record) = srv::resolve_srv(resolver, host).await?
     {
         return Ok(ResolvedAddress {
             host: record.target,
@@ -182,4 +182,21 @@ async fn ping_inner(
     }
 
     Ok(PingResult { status, latency })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards against accidentally making the public futures `!Send` (e.g. by
+    /// borrowing a thread-local RNG across `.await`), which would break
+    /// `tokio::spawn` for downstream users.
+    #[test]
+    fn public_futures_are_send() {
+        fn assert_send<T: Send>(_: T) {}
+        let address = ServerAddress::new("127.0.0.1", 25565);
+        let options = PingOptions::default();
+        assert_send(ping(&address, &options));
+        assert_send(resolve_server_address(&address.host, address.port));
+    }
 }

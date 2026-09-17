@@ -4,7 +4,6 @@ use std::sync::LazyLock;
 
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
-use rand::{Rng, RngExt};
 
 use crate::error::Error;
 
@@ -43,7 +42,6 @@ pub(crate) fn shared_resolver() -> Option<&'static TokioResolver> {
 pub(crate) async fn resolve_srv(
     resolver: &TokioResolver,
     host: &str,
-    rng: &mut impl Rng,
 ) -> Result<Option<SrvRecord>, Error> {
     // Query as an FQDN (trailing dot) so the resolver's search domains are
     // not appended to `_minecraft._tcp.<host>`.
@@ -65,7 +63,7 @@ pub(crate) async fn resolve_srv(
         .filter_map(srv_from_record)
         .collect();
 
-    Ok(pick_srv(records, rng))
+    Ok(pick_srv(records))
 }
 
 fn srv_from_record(record: &hickory_resolver::proto::rr::Record) -> Option<SrvRecord> {
@@ -88,7 +86,11 @@ fn srv_from_record(record: &hickory_resolver::proto::rr::Record) -> Option<SrvRe
 
 /// RFC 2782 target selection: lowest priority group first; within the group,
 /// choose weighted-random by `weight` (uniform when all weights are 0).
-fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut impl Rng) -> Option<SrvRecord> {
+///
+/// Uses rand's free functions (`rand::random_range`), which are thread-safe
+/// and carry no RNG handle across `.await` — a `&mut ThreadRng` borrowed over
+/// an await would make the surrounding future `!Send`.
+fn pick_srv(mut records: Vec<SrvRecord>) -> Option<SrvRecord> {
     if records.is_empty() {
         return None;
     }
@@ -103,12 +105,12 @@ fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut impl Rng) -> Option<SrvRecord
 
     if total == 0 {
         // All weights zero → uniform choice.
-        let idx = rng.random_range(0..pool.len());
+        let idx = rand::random_range(0..pool.len());
         return pool.into_iter().nth(idx);
     }
 
     // Weighted: pick the record whose running sum crosses the random point.
-    let mut cursor = rng.random_range(0..total);
+    let mut cursor = rand::random_range(0..total);
     for record in pool {
         let weight = u64::from(record.weight);
         if weight > cursor {
@@ -123,12 +125,6 @@ fn pick_srv(mut records: Vec<SrvRecord>, rng: &mut impl Rng) -> Option<SrvRecord
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
-    fn seeded() -> StdRng {
-        StdRng::seed_from_u64(0x5EED)
-    }
 
     fn rec(priority: u16, weight: u16, port: u16, target: &str) -> SrvRecord {
         SrvRecord {
@@ -141,12 +137,12 @@ mod tests {
 
     #[test]
     fn empty_records_yield_none() {
-        assert_eq!(pick_srv(vec![], &mut seeded()), None);
+        assert_eq!(pick_srv(vec![],), None);
     }
 
     #[test]
     fn single_record_wins() {
-        let picked = pick_srv(vec![rec(10, 5, 123, "mc.example.com")], &mut seeded());
+        let picked = pick_srv(vec![rec(10, 5, 123, "mc.example.com")]);
         assert_eq!(picked, Some(rec(10, 5, 123, "mc.example.com")));
     }
 
@@ -157,7 +153,7 @@ mod tests {
             rec(5, 0, 2, "b.example.com"),
             rec(5, 0, 3, "c.example.com"),
         ];
-        let picked = pick_srv(pool, &mut seeded()).unwrap();
+        let picked = pick_srv(pool).unwrap();
         assert_eq!(picked.priority, 5);
     }
 
@@ -168,7 +164,7 @@ mod tests {
             rec(1, 0, 2, "b.example.com"),
             rec(1, 0, 3, "c.example.com"),
         ];
-        let picked = pick_srv(pool, &mut seeded()).unwrap();
+        let picked = pick_srv(pool).unwrap();
         assert_eq!(picked.priority, 1);
         assert!([1, 2, 3].contains(&picked.port));
     }
@@ -178,7 +174,7 @@ mod tests {
         // Weight 1 : 3 — the pick must be one of the two lowest-priority
         // records, not fixed to a hand-computed rng sequence.
         let pool = vec![rec(1, 1, 1, "a.example.com"), rec(1, 3, 2, "b.example.com")];
-        let picked = pick_srv(pool, &mut seeded()).unwrap();
+        let picked = pick_srv(pool).unwrap();
         assert_eq!(picked.priority, 1);
         assert!([1, 2].contains(&picked.port));
     }
