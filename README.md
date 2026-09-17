@@ -66,6 +66,7 @@ latency:     210.869998ms
 | Only the *modern* (1.7+) protocol | Legacy ≤1.6 ping, proxying and mod-list parsing are out of scope |
 | [`varint`] crate for VarInts | But only its *unsigned* methods — its signed methods are protobuf **zigzag**, which does not match Minecraft (protocol `-1` must encode as `FF FF FF FF 0F`). The frame-length VarInt, which must be read incrementally from the async stream, is a tiny 5-byte-capped loop since the crate is `std::io`-only |
 | Typed status JSON | `StatusResponse` structs, kept lenient: unknown fields ignored, optional fields defaulted; `description` stays `serde_json::Value` (string or Chat-component object) |
+| Reused DNS resolver | A single process-wide `hickory_resolver::Resolver` is built lazily and shared across pings — it is `Clone + Sync` and its `moka` answer cache is shared on clone, so per-call construction would discard the cache |
 | RFC 2782 weighted SRV pick | weight-proportional random within the lowest-priority group; uniform when all weights are 0; root (`"."`) targets skipped |
 | Timeout + frame-size cap | Whole operation wrapped in `PingOptions::timeout`; frames capped at `PingOptions::max_frame_size` (1 MiB default) |
 

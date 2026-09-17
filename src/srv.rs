@@ -1,5 +1,6 @@
 //! SRV resolution for `_minecraft._tcp.<host>`, with RFC 2782 ranking.
 
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hickory_resolver::TokioResolver;
@@ -16,12 +17,27 @@ pub(crate) struct SrvRecord {
     pub(crate) target: String,
 }
 
-/// Build the per-call default resolver (system `/etc/resolv.conf` + tokio).
-pub(crate) fn default_tokio_resolver() -> Result<TokioResolver, Error> {
-    TokioResolver::builder_tokio()
-        .map_err(|e| Error::Dns(e.to_string()))?
-        .build()
-        .map_err(|e| Error::Dns(e.to_string()))
+/// The process-wide default resolver, built lazily on first SRV lookup.
+///
+/// [`TokioResolver`] is `Clone + Send + Sync` and keeps its name-server pool
+/// (`Arc<PoolContext>`) and its answer cache (a `moka` cache that is shared on
+/// clone) behind reference-counted handles, so a single instance is meant to be
+/// reused: every lookup then shares the same DNS cache. Building a resolver per
+/// ping would discard that cache and re-read the system resolver config each
+/// time.
+///
+/// Returns `None` if the system resolver configuration cannot be read; callers
+/// then fall back to connecting directly. The failure is remembered, so it is
+/// not retried on every call.
+pub(crate) fn shared_resolver() -> Option<&'static TokioResolver> {
+    static RESOLVER: OnceLock<Option<TokioResolver>> = OnceLock::new();
+    RESOLVER
+        .get_or_init(|| {
+            TokioResolver::builder_tokio()
+                .ok()
+                .and_then(|builder| builder.build().ok())
+        })
+        .as_ref()
 }
 
 /// Query `_minecraft._tcp.<host>` and pick one target per RFC 2782.
@@ -195,5 +211,14 @@ mod tests {
         );
         // Root target (RFC 2782 "service not available") is skipped.
         assert!(srv_from_record(&rec).is_none());
+    }
+
+    #[test]
+    fn shared_resolver_is_reused() {
+        // May be None in environments without system DNS config; when
+        // available, every call must return the same instance (shared cache).
+        if let (Some(a), Some(b)) = (shared_resolver(), shared_resolver()) {
+            assert!(std::ptr::eq(a, b));
+        }
     }
 }

@@ -101,19 +101,23 @@ pub async fn resolve_server_address_with_options(
         });
     }
 
-    let resolver = srv::default_tokio_resolver()?;
-    match srv::resolve_srv(&resolver, host, &mut *srv::rng()).await? {
-        Some(record) => Ok(ResolvedAddress {
+    // Reuse the process-wide resolver (shared DNS cache); on init failure or
+    // when there is no usable SRV record, connect directly.
+    if let Some(resolver) = srv::shared_resolver()
+        && let Some(record) = srv::resolve_srv(resolver, host, &mut *srv::rng()).await?
+    {
+        return Ok(ResolvedAddress {
             host: record.target,
             port: record.port,
             used_srv: true,
-        }),
-        None => Ok(ResolvedAddress {
-            host: host.to_string(),
-            port,
-            used_srv: false,
-        }),
+        });
     }
+
+    Ok(ResolvedAddress {
+        host: host.to_string(),
+        port,
+        used_srv: false,
+    })
 }
 
 /// Ping a Minecraft Java server and (optionally) measure latency.
