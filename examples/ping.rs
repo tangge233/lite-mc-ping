@@ -18,7 +18,7 @@ async fn main() {
 
     println!("pinging {address} …");
     match ping(&address, &options).await {
-        Ok(result) => print_result(&address, &result),
+        Ok(result) => print_result(&address, &result, options.measure_latency),
         Err(err) => {
             eprintln!("ping failed: {err}");
             std::process::exit(1);
@@ -58,7 +58,7 @@ fn parse_args(args: Vec<String>) -> Result<(ServerAddress, PingOptions), String>
     Ok((address, options))
 }
 
-fn print_result(address: &ServerAddress, result: &lite_mc_ping::PingResult) {
+fn print_result(address: &ServerAddress, result: &lite_mc_ping::PingResult, measured: bool) {
     let s = &result.status;
     println!("host:        {address}");
     println!(
@@ -75,8 +75,9 @@ fn print_result(address: &ServerAddress, result: &lite_mc_ping::PingResult) {
     if let Some(favicon) = &s.favicon {
         println!("favicon:     {} bytes (base64)", favicon.len());
     }
-    match result.latency {
-        Some(latency) => println!("latency:     {latency:?}"),
-        None => println!("latency:     not measured (use --latency)"),
+    match (result.latency, measured) {
+        (Some(latency), _) => println!("latency:     {latency:?}"),
+        (None, true) => println!("latency:     unavailable (no pong)"),
+        (None, false) => println!("latency:     not measured (use --latency)"),
     }
 }

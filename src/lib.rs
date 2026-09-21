@@ -74,11 +74,11 @@ mod models;
 mod protocol;
 mod srv;
 
-use std::time::Instant;
+use std::time::Duration;
 
 use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 
 pub use error::Error;
 pub use models::{
@@ -138,12 +138,20 @@ fn direct(address: &ServerAddress) -> ResolvedAddress {
 
 /// Ping a Minecraft Java server and (optionally) measure latency.
 ///
-/// The whole operation is bounded by [`PingOptions::timeout`].
+/// The status exchange must fit inside [`PingOptions::timeout`]; the latency
+/// round trip is best-effort and reports `None` rather than failing the ping
+/// (see [`PingResult::latency`]).
 pub async fn ping(address: &ServerAddress, options: &PingOptions) -> Result<PingResult, Error> {
-    let resolved = resolve_server_address_with_options(address, options).await?;
-    timeout(
-        options.timeout,
-        ping_inner(&resolved, &address.host, options),
+    let deadline = Instant::now() + options.timeout;
+    let resolved = timeout_at(
+        deadline,
+        resolve_server_address_with_options(address, options),
+    )
+    .await
+    .map_err(|_| Error::Timeout(options.timeout))??;
+    timeout_at(
+        deadline,
+        ping_inner(&resolved, &address.host, options, deadline),
     )
     .await
     .map_err(|_| Error::Timeout(options.timeout))?
@@ -153,6 +161,7 @@ async fn ping_inner(
     resolved: &ResolvedAddress,
     original_host: &str,
     options: &PingOptions,
+    deadline: Instant,
 ) -> Result<PingResult, Error> {
     // Wildcard SRV targets ("*.example.com") cannot be resolved to a host.
     if resolved.host.contains('*') {
@@ -183,19 +192,35 @@ async fn ping_inner(
     let status_frame = protocol::read_frame(&mut stream, options.max_frame_size).await?;
     let status = protocol::parse_status_frame(&status_frame)?;
 
-    let mut latency = None;
-    if options.measure_latency {
-        stream
-            .write_all(&protocol::build_ping_packet(protocol::now_nanos())?)
-            .await?;
-        stream.flush().await?;
-        let start = Instant::now();
-        let pong_frame = protocol::read_frame(&mut stream, options.max_frame_size).await?;
-        protocol::parse_pong_frame(&pong_frame)?;
-        latency = Some(start.elapsed());
-    }
+    // The status is in hand: from here on nothing may fail the ping. The extra
+    // round trip only gets the time left on the clock, and any failure — a
+    // server that hangs up, ignores the ping, or outlives the deadline — costs
+    // the latency instead of the result.
+    let latency = if options.measure_latency {
+        match timeout_at(deadline, ping_round_trip(&mut stream, options)).await {
+            Ok(Ok(rtt)) => Some(rtt),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    } else {
+        None
+    };
 
     Ok(PingResult { status, latency })
+}
+
+/// The extra ping/pong exchange (packet id `0x01`), returning the round trip.
+async fn ping_round_trip(
+    stream: &mut BufStream<TcpStream>,
+    options: &PingOptions,
+) -> Result<Duration, Error> {
+    stream
+        .write_all(&protocol::build_ping_packet(protocol::now_nanos())?)
+        .await?;
+    stream.flush().await?;
+    let start = Instant::now();
+    let pong_frame = protocol::read_frame(stream, options.max_frame_size).await?;
+    protocol::parse_pong_frame(&pong_frame)?;
+    Ok(start.elapsed())
 }
 
 #[cfg(test)]
@@ -223,5 +248,84 @@ mod tests {
         assert_eq!(resolved.host, "mc233.cn");
         assert_eq!(resolved.port, 1234);
         assert!(!resolved.used_srv);
+    }
+
+    /// Status response the fake server answers with.
+    const STATUS_JSON: &str = r#"{"version":{"name":"1.21.4","protocol":769},"players":{"max":10,"online":1},"description":"Hi"}"#;
+
+    /// Largest frame the fake server accepts.
+    const FRAME_LIMIT: u32 = 1024 * 1024;
+
+    /// Serve one status exchange on a loopback port and return that port.
+    ///
+    /// The handshake and status request are answered with [`STATUS_JSON`], then
+    /// the ping is read and — `hang_up` picking between them — the connection
+    /// is either closed (the client sees EOF) or left open (the client waits
+    /// for its deadline). The pong is never sent, in both cases.
+    async fn serve_status_without_pong(hang_up: bool) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            protocol::read_frame(&mut socket, FRAME_LIMIT)
+                .await
+                .unwrap(); // handshake
+            protocol::read_frame(&mut socket, FRAME_LIMIT)
+                .await
+                .unwrap(); // status request
+            socket
+                .write_all(&protocol::build_status_frame(STATUS_JSON).unwrap())
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            protocol::read_frame(&mut socket, FRAME_LIMIT)
+                .await
+                .unwrap(); // ping
+            if hang_up {
+                return; // dropping the socket closes it
+            }
+            std::future::pending::<()>().await;
+        });
+        port
+    }
+
+    fn measured_options(timeout: Duration) -> PingOptions {
+        PingOptions {
+            measure_latency: true,
+            timeout,
+            ..Default::default()
+        }
+    }
+
+    /// A server that hangs up after the status must still deliver its status:
+    /// the round trip is best-effort, so the failed measurement reports `None`
+    /// instead of discarding the response.
+    #[tokio::test]
+    async fn latency_failure_still_returns_status() {
+        let port = serve_status_without_pong(true).await;
+        let result = ping(
+            &ServerAddress::new("127.0.0.1", port),
+            &measured_options(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status.version.name, "1.21.4");
+        assert_eq!(result.status.description, "Hi");
+        assert!(result.latency.is_none(), "a failed round trip reports None");
+    }
+
+    /// Same for a server that keeps the connection open and never answers the
+    /// ping: running out of time costs the latency, not the result.
+    #[tokio::test]
+    async fn latency_timeout_still_returns_status() {
+        let port = serve_status_without_pong(false).await;
+        let result = ping(
+            &ServerAddress::new("127.0.0.1", port),
+            &measured_options(Duration::from_millis(250)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status.version.name, "1.21.4");
+        assert!(result.latency.is_none(), "an unanswered ping reports None");
     }
 }

@@ -68,6 +68,19 @@ fn pack_frame(body: Vec<u8>) -> Result<Vec<u8>, Error> {
     Ok(frame.into_inner())
 }
 
+/// Build a status response frame carrying `json`.
+///
+/// Test scaffolding for the in-process fake server, encoding the frame the
+/// same way a real server does.
+#[cfg(test)]
+pub(crate) fn build_status_frame(json: &str) -> Result<Vec<u8>, Error> {
+    let mut body = Cursor::new(Vec::with_capacity(1 + 5 + json.len()));
+    body.write_unsigned_varint_32(0x00)?; // packet id: status response
+    body.write_unsigned_varint_32(json.len() as u32)?; // string length prefix
+    body.write_all(json.as_bytes())?;
+    pack_frame(body.into_inner())
+}
+
 // ─── Decoding ────────────────────────────────────────────────────────────────
 
 /// Read the frame-length VarInt from an async stream, capped at 5 bytes.

@@ -143,9 +143,14 @@ pub struct PingOptions {
     /// varint of the two's-complement value.
     pub protocol_version: i32,
     /// Whether to perform the extra ping/pong exchange (packet id `0x01`) and
-    /// report the round-trip latency in [`PingResult::latency`].
+    /// report the round-trip latency in [`PingResult::latency`]. Best-effort:
+    /// a failed or slow exchange leaves the latency `None` without failing the
+    /// ping.
     pub measure_latency: bool,
-    /// Overall timeout for the whole operation.
+    /// Overall timeout for the whole operation. The status exchange must fit
+    /// inside it; the latency round trip only gets whatever time is left, and
+    /// running out of it reports [`PingResult::latency`] `None` rather than
+    /// [`crate::Error::Timeout`].
     pub timeout: Duration,
     /// Maximum accepted frame size; guards against excessive declared lengths.
     pub max_frame_size: u32,
@@ -173,8 +178,12 @@ impl Default for PingOptions {
 pub struct PingResult {
     /// Parsed status response JSON.
     pub status: StatusResponse,
-    /// Ping/pong round-trip time, present only when
-    /// [`PingOptions::measure_latency`] was enabled.
+    /// Ping/pong round-trip time.
+    ///
+    /// `None` when [`PingOptions::measure_latency`] was off, and also when the
+    /// round trip failed or ran out of the operation's time: the measurement is
+    /// best-effort, so a server that hangs up or ignores the ping still yields
+    /// [`PingResult::status`].
     pub latency: Option<Duration>,
 }
 

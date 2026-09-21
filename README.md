@@ -20,7 +20,9 @@ Server → Client: Pong         (0x01) same timestamp          [optional]
   or empty lookup falls back to the address as given. When an SRV record is used, the
   handshake keeps the *original* hostname (Mojang-client behavior).
 - **Optional latency** — `PingOptions::measure_latency` runs the ping/pong round trip
-  and reports the RTT in `PingResult::latency`.
+  and reports the RTT in `PingResult::latency`. Best-effort: the exchange only gets the
+  time left on the timeout, and a server that hangs up or never answers leaves the
+  latency `None` while the status is still returned.
 - **Typed response** — status JSON deserializes into `StatusResponse` (version,
   players, player sample, description, favicon, chat flags).
 - **MOTD conversion** — `chat::to_legacy_text` renders the JSON Chat component into
@@ -99,6 +101,7 @@ $ cargo run --example ping -- --latency play.hypixel.net
 | Hex colors downgraded | `#rrggbb` maps to the nearest of the 16 legacy colors (vanilla behavior), not the BungeeCord `§x§r§r§g§g§b§b` extension, which vanilla clients do not understand |
 | `translate` best-effort | The real text lives in the client's language files, so `fallback` is used when present, otherwise the `with` arguments joined by a space |
 | SRV only fills in what was left out | Only a bare hostname leaves the port open, so an explicit port or IP literal is used as-is — a record could only contradict the caller. `PingOptions::use_srv = false` disables the lookup entirely |
+| Latency is best-effort | The status is the valuable part of a ping, so a failed ping/pong (hang-up, no answer, deadline reached) reports `latency: None` instead of discarding a parsed status. The round trip only draws on the time left of `PingOptions::timeout` |
 | Reused DNS resolver | One lazily built process-wide `hickory_resolver::Resolver` is shared across pings; it is `Clone + Sync` and its `moka` answer cache is shared on clone |
 | RFC 2782 SRV selection | Weighted-random within the lowest-priority group; uniform when all weights are 0; root (`"."`) targets skipped |
 | Timeout + size caps | Whole operation bounded by `PingOptions::timeout`; frames capped at `max_frame_size` (1 MiB default) |
@@ -106,9 +109,9 @@ $ cargo run --example ping -- --latency play.hypixel.net
 ## Tests
 
 `cargo test` runs unit tests for VarInt/packet encoding, response parsing, RFC 2782
-SRV selection and Chat-component conversion, plus network integration tests that
-ping the real servers in `tests/integration.rs` (SRV resolution, status fields,
-latency on/off, timeout).
+SRV selection and Chat-component conversion — including a loopback fake server that
+covers the latency failure paths — plus network integration tests that ping the real
+servers in `tests/integration.rs` (SRV resolution, status fields, latency, timeout).
 
 ## License
 
