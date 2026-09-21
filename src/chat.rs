@@ -4,49 +4,35 @@
 //! raw JSON because a MOTD is either a plain string or a Chat-component object
 //! (`{"text": …}`, `{"extra": […]}`). [`to_legacy_text`] renders both shapes
 //! into the `§`-coded legacy format understood by server lists, MOTD tooling
-//! and plain logs; [`to_plain_text`] drops the styling instead.
+//! and plain logs (see <https://minecraft.wiki/w/Text_component_format>);
+//! [`to_plain_text`] drops the styling instead.
 //!
 //! Supported:
 //!
 //! * every component shape — string, array and object, with nested `extra`
 //!   children and `with` arguments;
 //! * colors — the 16 legacy names, `"reset"` and `"#rrggbb"`, the latter
-//!   downgraded to the nearest legacy color (vanilla behavior: the format has
-//!   no 24-bit color);
+//!   downgraded to the nearest legacy color, since the format carries no 24-bit
+//!   color;
 //! * styles — `bold`, `italic`, `underlined`, `strikethrough` and
 //!   `obfuscated`, inherited from the parent component unless overridden.
 //!
-//! Both functions drop legacy codes embedded in literal text (`"§cred"` →
-//! `"red"`), so server text cannot override the styles written around it.
+//! Legacy codes inside a component's text are that component's own business: a
+//! client applies them over the style around them, so [`to_legacy_text`] writes
+//! the text verbatim — `{"text":"§x§F§F§5§5§5§5hi","color":"green"}` renders
+//! dark purple, not green, and dropping the codes would repaint it. The writer
+//! can therefore not assume a client that read such text is still in the state
+//! it left it in. [`to_plain_text`] drops the codes with the rest of the
+//! styling, since a client shows no formatting at all.
 //!
 //! Anything the legacy format cannot express is skipped: `score`, `selector`,
 //! `keybind`, `nbt` and the 1.21.9+ `object` sprites contribute no text.
 //! `translate` is rendered best-effort from `fallback` or the `with`
 //! arguments, since the real text lives in the client's language files.
-//!
-//! See <https://minecraft.wiki/w/Text_component_format>.
 
 use serde_json::{Map, Value};
 
-/// The 16 legacy colors in code order (`§0`…`§f`), with their RGB values.
-const COLORS: [(char, u32); 16] = [
-    ('0', 0x000000), // black
-    ('1', 0x0000AA), // dark_blue
-    ('2', 0x00AA00), // dark_green
-    ('3', 0x00AAAA), // dark_aqua
-    ('4', 0xAA0000), // dark_red
-    ('5', 0xAA00AA), // dark_purple
-    ('6', 0xFFAA00), // gold
-    ('7', 0xAAAAAA), // gray
-    ('8', 0x555555), // dark_gray
-    ('9', 0x5555FF), // blue
-    ('a', 0x55FF55), // green
-    ('b', 0x55FFFF), // aqua
-    ('c', 0xFF5555), // red
-    ('d', 0xFF55FF), // light_purple
-    ('e', 0xFFFF55), // yellow
-    ('f', 0xFFFFFF), // white
-];
+// ─── Conversion ──────────────────────────────────────────────────────────────
 
 /// Convert a Chat component into legacy `§`-coded text.
 ///
@@ -80,7 +66,7 @@ const COLORS: [(char, u32); 16] = [
 pub fn to_legacy_text(component: &Value) -> String {
     let mut writer = LegacyWriter {
         out: String::new(),
-        active: Style::default(),
+        active: Some(Style::default()),
     };
     walk(component, Style::default(), &mut |text, style| {
         writer.push(text, style)
@@ -88,8 +74,10 @@ pub fn to_legacy_text(component: &Value) -> String {
     writer.out
 }
 
-/// Convert a Chat component into plain text: the content of
-/// [`to_legacy_text`] with the styling left out.
+/// Convert a Chat component into plain text: the text [`to_legacy_text`]
+/// renders, with the styling left out — including the codes embedded in the
+/// text, which a client reads as formatting (a `§` and the character after it,
+/// valid code or not) and therefore never shows.
 ///
 /// # Example
 ///
@@ -101,14 +89,36 @@ pub fn to_legacy_text(component: &Value) -> String {
 /// assert_eq!(to_plain_text(&motd), "Line one\nLine two");
 /// ```
 pub fn to_plain_text(component: &Value) -> String {
-    // Still resolves the style per segment so both functions share one
-    // traversal; the style is simply not written out.
+    // Shares its traversal with `to_legacy_text`, which resolves the style of
+    // every segment; here that style is simply not written out.
     let mut out = String::new();
     walk(component, Style::default(), &mut |text, _| {
-        push_text(&mut out, text)
+        push_plain_text(&mut out, text)
     });
     out
 }
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
+/// The 16 legacy colors in code order (`§0`…`§f`), with their RGB values.
+const COLORS: [(char, u32); 16] = [
+    ('0', 0x000000), // black
+    ('1', 0x0000AA), // dark_blue
+    ('2', 0x00AA00), // dark_green
+    ('3', 0x00AAAA), // dark_aqua
+    ('4', 0xAA0000), // dark_red
+    ('5', 0xAA00AA), // dark_purple
+    ('6', 0xFFAA00), // gold
+    ('7', 0xAAAAAA), // gray
+    ('8', 0x555555), // dark_gray
+    ('9', 0x5555FF), // blue
+    ('a', 0x55FF55), // green
+    ('b', 0x55FFFF), // aqua
+    ('c', 0xFF5555), // red
+    ('d', 0xFF55FF), // light_purple
+    ('e', 0xFFFF55), // yellow
+    ('f', 0xFFFFFF), // white
+];
 
 /// A style with inheritance applied: `color` is an index into [`COLORS`]
 /// (`None` = no color code, i.e. the client's default), the flags are concrete.
@@ -125,37 +135,47 @@ struct Style {
 impl Style {
     /// Resolve a component object's style against its parent's.
     ///
-    /// `"color": "reset"` clears the inherited color and styles; values that
-    /// are not understood (unknown color names, non-boolean flags) are ignored
-    /// and the inherited value carries over, matching the crate's lenient
-    /// parsing elsewhere.
+    /// `"color": "reset"` clears the inherited color and styles. Values that are
+    /// not understood — unknown color names, non-boolean flags — are ignored and
+    /// the inherited value carries over, matching the crate's lenient parsing
+    /// elsewhere.
     fn resolve(parent: Self, obj: &Map<String, Value>) -> Self {
         let mut style = parent;
-        match obj.get("color") {
-            Some(Value::String(name)) if name == "reset" => style = Self::default(),
-            Some(Value::String(name)) => {
-                if let Some(index) = color_index(name) {
-                    style.color = Some(index);
-                }
+        if let Some(Value::String(name)) = obj.get("color") {
+            if name == "reset" {
+                style = Self::default();
+            } else if let Some(index) = color_index(name) {
+                style.color = Some(index);
             }
-            _ => {}
         }
-        if let Some(value) = flag(obj, "bold") {
-            style.bold = value;
-        }
-        if let Some(value) = flag(obj, "italic") {
-            style.italic = value;
-        }
-        if let Some(value) = flag(obj, "underlined") {
-            style.underlined = value;
-        }
-        if let Some(value) = flag(obj, "strikethrough") {
-            style.strikethrough = value;
-        }
-        if let Some(value) = flag(obj, "obfuscated") {
-            style.obfuscated = value;
+        for (key, field) in [
+            ("bold", &mut style.bold),
+            ("italic", &mut style.italic),
+            ("underlined", &mut style.underlined),
+            ("strikethrough", &mut style.strikethrough),
+            ("obfuscated", &mut style.obfuscated),
+        ] {
+            if let Some(value) = flag(obj, key) {
+                *field = value;
+            }
         }
         style
+    }
+
+    /// Whether a client already in this state renders `other` as it is: nothing
+    /// `other` turns off is on here.
+    ///
+    /// Vanilla can only switch an attribute off with `§r`, which clears the
+    /// color too, so a run that drops one costs a reset. Attributes `other`
+    /// turns *on* are written as codes when its run is written, and the ones
+    /// running here that `other` keeps are simply left on.
+    fn covers(&self, other: &Self) -> bool {
+        (self.color.is_none() || other.color.is_some())
+            && (!self.bold || other.bold)
+            && (!self.italic || other.italic)
+            && (!self.underlined || other.underlined)
+            && (!self.strikethrough || other.strikethrough)
+            && (!self.obfuscated || other.obfuscated)
     }
 }
 
@@ -192,26 +212,21 @@ fn parse_hex(name: &str) -> Option<u32> {
     u32::from_str_radix(digits, 16).ok()
 }
 
-/// Index of the legacy color closest to `rgb` by squared sRGB distance; an
-/// exact match has distance 0 and therefore always wins, ties go to the
-/// earlier entry in [`COLORS`].
+/// Index of the legacy color closest to `rgb`.
 ///
-/// This mirrors what vanilla clients fall back to for 24-bit colors rather
-/// than the BungeeCord `§x§r§r§g§g§b§b` extension, which vanilla does not
-/// understand.
+/// [`min_by_key`] keeps the first minimum, so a tie goes to the earlier entry in
+/// [`COLORS`], and an exact match has distance 0 and always wins.
+///
+/// Downgrading is the only option: the format carries no 24-bit color, and the
+/// `§x§r§r§g§g§b§b` extension that would carry one is not understood by vanilla
+/// clients — they drop the unknown `§x` pair and read the hex digits after it
+/// as codes of their own.
 fn nearest_color(rgb: u32) -> usize {
-    let (r, g, b) = channels(rgb);
-    let mut best = 0;
-    let mut best_distance = u32::MAX;
-    for (index, &(_, value)) in COLORS.iter().enumerate() {
-        let (other_r, other_g, other_b) = channels(value);
-        let distance = square(r, other_r) + square(g, other_g) + square(b, other_b);
-        if distance < best_distance {
-            best_distance = distance;
-            best = index;
-        }
-    }
-    best
+    COLORS
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, &(_, value))| distance(rgb, value))
+        .map_or(0, |(index, _)| index)
 }
 
 /// Split an RGB value into its three channels.
@@ -223,16 +238,29 @@ fn channels(rgb: u32) -> (i32, i32, i32) {
     )
 }
 
-/// Squared difference between two channel values.
+/// Squared difference between two 0–255 channel values: at most `255²` per
+/// channel, so the three-channel sum in [`distance`] cannot overflow a `u32`.
 fn square(a: i32, b: i32) -> u32 {
     let diff = (a - b).unsigned_abs();
     diff * diff
+}
+
+/// Squared sRGB distance between two colors.
+///
+/// Squared, so the comparison needs no square root: it orders distances exactly
+/// and keeps equidistant colors tied, which is what [`nearest_color`] resolves.
+fn distance(a: u32, b: u32) -> u32 {
+    let (a_r, a_g, a_b) = channels(a);
+    let (b_r, b_g, b_b) = channels(b);
+    square(a_r, b_r) + square(a_g, b_g) + square(a_b, b_b)
 }
 
 /// A boolean style flag, if present as a JSON boolean.
 fn flag(obj: &Map<String, Value>, key: &str) -> Option<bool> {
     obj.get(key)?.as_bool()
 }
+
+// ─── Traversal ───────────────────────────────────────────────────────────────
 
 /// Walk a component tree, handing every literal text run to `emit` along with
 /// the style resolved for it. Returns the style the component's own content
@@ -244,15 +272,16 @@ fn walk(component: &Value, parent: Style, emit: &mut impl FnMut(&str, Style)) ->
             emit(text, parent);
             parent
         }
-        // A list is shorthand for `{text: <first>, extra: [<rest>]}`, so every
-        // element after the first inherits the first one's style.
+        // A list is shorthand for `{text: <first>, extra: [<rest>]}`, so the
+        // first element's style is what the rest inherit.
         Value::Array(items) => {
-            let mut inherited = parent;
-            for (index, item) in items.iter().enumerate() {
-                let style = walk(item, inherited, emit);
-                if index == 0 {
-                    inherited = style;
-                }
+            let mut rest = items.iter();
+            let Some(first) = rest.next() else {
+                return parent;
+            };
+            let inherited = walk(first, parent, emit);
+            for item in rest {
+                walk(item, inherited, emit);
             }
             inherited
         }
@@ -272,21 +301,18 @@ fn walk(component: &Value, parent: Style, emit: &mut impl FnMut(&str, Style)) ->
             }
             style
         }
-        // Numbers and booleans are shorthand for their string form; `null` and
-        // unknown shapes are not text at all.
-        Value::Number(number) => {
-            emit(&number.to_string(), parent);
-            parent
-        }
-        Value::Bool(value) => {
-            emit(if *value { "true" } else { "false" }, parent);
+        // Numbers and booleans are shorthand for the text they stringify to;
+        // `null` and unknown shapes carry no text at all.
+        Value::Number(_) | Value::Bool(_) => {
+            emit_literal(component, parent, emit);
             parent
         }
         Value::Null => parent,
     }
 }
 
-/// Emit a `text` value (or a shorthand element).
+/// Emit a component position that carries text: a `text` value, or a shorthand
+/// string, number or boolean standing in for one.
 fn emit_literal(value: &Value, style: Style, emit: &mut impl FnMut(&str, Style)) {
     match value {
         Value::String(text) => emit(text, style),
@@ -318,16 +344,21 @@ fn emit_translation(obj: &Map<String, Value>, style: Style, emit: &mut impl FnMu
     }
 }
 
-/// Renders resolved segments into `§`-coded legacy text.
+// ─── Legacy output ───────────────────────────────────────────────────────────
+
+/// Accumulates the legacy text for the segments [`walk`] resolves, writing the
+/// codes each one needs and no more.
 ///
 /// Legacy codes are stateful: a code applies until it is changed, and a style
 /// can only be switched off by `§r`, which also clears the color. `active`
 /// tracks the state a client would be in after reading everything written so
-/// far, so each segment writes only the codes it needs, plus one reset when a
+/// far, so a segment writes the codes it still needs, plus one reset when a
 /// previously written attribute has to be dropped.
 struct LegacyWriter {
     out: String,
-    active: Style,
+    /// The style a client is in after reading `out`, or `None` once a segment's
+    /// own text carried codes: what those left behind cannot be known here.
+    active: Option<Style>,
 }
 
 impl LegacyWriter {
@@ -338,92 +369,76 @@ impl LegacyWriter {
         if text.is_empty() {
             return;
         }
-        let needs_reset = (self.active.color.is_some() && style.color.is_none())
-            || (self.active.bold && !style.bold)
-            || (self.active.italic && !style.italic)
-            || (self.active.underlined && !style.underlined)
-            || (self.active.strikethrough && !style.strikethrough)
-            || (self.active.obfuscated && !style.obfuscated);
-        if needs_reset {
-            self.out.push_str("§r");
-            self.active = Style::default();
+        let mut active = self.active.unwrap_or_default();
+        // `None` means an earlier run's own codes left the client somewhere
+        // unknowable, so this run starts from a state it states itself.
+        if !self.active.is_some_and(|state| state.covers(&style)) {
+            push_code(&mut self.out, 'r');
+            active = Style::default();
         }
         if let Some(index) = style.color
-            && self.active.color != style.color
+            && active.color != style.color
         {
-            self.out.push('§');
-            self.out.push(COLORS[index].0);
+            push_code(&mut self.out, COLORS[index].0);
+            // A color code clears the flags as well — vanilla's `§l` and friends
+            // only turn attributes on — so the color is all that survives it,
+            // and the flags below are written again where they are wanted.
+            active = Style {
+                color: Some(index),
+                ..Style::default()
+            };
         }
-        for (wanted, active, code) in [
-            (style.bold, self.active.bold, 'l'),
-            (style.italic, self.active.italic, 'o'),
-            (style.underlined, self.active.underlined, 'n'),
-            (style.strikethrough, self.active.strikethrough, 'm'),
-            (style.obfuscated, self.active.obfuscated, 'k'),
+        for (wanted, on, code) in [
+            (style.bold, active.bold, 'l'),
+            (style.italic, active.italic, 'o'),
+            (style.underlined, active.underlined, 'n'),
+            (style.strikethrough, active.strikethrough, 'm'),
+            (style.obfuscated, active.obfuscated, 'k'),
         ] {
-            if wanted && !active {
-                self.out.push('§');
-                self.out.push(code);
+            if wanted && !on {
+                push_code(&mut self.out, code);
             }
         }
-        self.active = style;
-        push_text(&mut self.out, text);
+        // The text goes out as it came in: a client applies the codes inside it
+        // over the style just written, exactly as it applies them over the
+        // component's own style, so rewriting them would change the rendering.
+        self.out.push_str(text);
+        self.active = if text.contains('§') {
+            None
+        } else {
+            Some(style)
+        };
     }
 }
 
-/// Append `text` to `out`, dropping the legacy codes embedded in it.
+/// Append the legacy code `§code` to `out`.
+fn push_code(out: &mut String, code: char) {
+    out.push('§');
+    out.push(code);
+}
+
+/// Append `text` to `out` the way a client shows it with the styling dropped.
 ///
-/// Component text should carry no codes — styling lives in the component — but
-/// plugins do embed them, and the legacy format has no escape for a `§`: left
-/// in place they would override the codes [`LegacyWriter`] believes it has
-/// written, and show up verbatim in plain text.
-fn push_text(out: &mut String, text: &str) {
-    if text.contains('§') {
-        strip_codes(out, text);
-    } else {
+/// A `§` in component text starts a formatting code, so the character after it
+/// is formatting too and a client never draws either — whether or not the code
+/// is one it knows (`§x`, `§z` and even `§ ` are swallowed, and a trailing `§`
+/// goes on its own). Keeping the character after an unknown code would show text
+/// the client does not: "50§ off" renders as "50off", not "50 off".
+fn push_plain_text(out: &mut String, text: &str) {
+    // Fast path: text carrying no codes is the common case.
+    if !text.contains('§') {
         out.push_str(text);
+        return;
     }
-}
-
-/// Append `text` to `out` one character at a time, dropping its legacy codes.
-///
-/// A code is `§` plus one character, typically introduced by a plugin that
-/// embedded legacy formatting in a component's text. Both characters are
-/// dropped so the words survive ("§cred" → "red"); a `§` followed by anything
-/// that is not a code only loses the `§`, since it carries no formatting.
-/// BungeeCord's `§x§r§r§g§g§b§b` RGB extension is spotted and dropped whole.
-fn strip_codes(out: &mut String, text: &str) {
-    let mut chars = text.chars().peekable();
+    let mut chars = text.chars();
     while let Some(c) = chars.next() {
-        if c != '§' {
+        if c == '§' {
+            // Skips the code's second character, or nothing at all.
+            chars.next();
+        } else {
             out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('x' | 'X') => {
-                for _ in 0..6 {
-                    if chars.peek() != Some(&'§') {
-                        break;
-                    }
-                    chars.next();
-                    if chars.peek().is_some_and(char::is_ascii_hexdigit) {
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            Some(code) if is_code(code) => {}
-            Some(other) => out.push(other),
-            None => {}
         }
     }
-}
-
-/// Whether `c` is the second character of a legacy formatting code: `0`–`9`
-/// and `a`–`f` colors, `k`–`o` styles, `r` reset.
-fn is_code(c: char) -> bool {
-    matches!(c, '0'..='9' | 'a'..='f' | 'k'..='o' | 'r')
 }
 
 #[cfg(test)]
@@ -491,6 +506,32 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_style_costs_no_codes() {
+        let motd = json!({
+            "text": "a",
+            "color": "red",
+            "bold": true,
+            "extra": [{"text": "b", "color": "red"}],
+        });
+        // Nothing changes across the child, so it needs no codes at all.
+        assert_eq!(to_legacy_text(&motd), "§c§lab");
+    }
+
+    #[test]
+    fn a_color_code_clears_the_flags_with_it() {
+        // `§a` switches the inherited bold off on the client (only `§l` and
+        // friends turn attributes on), so writing the color alone would drop it.
+        let motd = json!({
+            "text": "a",
+            "color": "red",
+            "bold": true,
+            "italic": true,
+            "extra": [{"text": "b", "color": "green"}],
+        });
+        assert_eq!(to_legacy_text(&motd), "§c§l§oa§a§l§ob");
+    }
+
+    #[test]
     fn color_reset_clears_inherited_color_and_style() {
         let motd = json!({
             "text": "a",
@@ -521,6 +562,16 @@ mod tests {
             to_legacy_text(&json!({"text": "x", "color": "#FF0000"})),
             "§4x"
         );
+        // Parsed case-insensitively …
+        assert_eq!(
+            to_legacy_text(&json!({"text": "x", "color": "#ff0000"})),
+            "§4x"
+        );
+        // … and equidistant to black and dark_blue, so the earlier entry wins.
+        assert_eq!(
+            to_legacy_text(&json!({"text": "x", "color": "#000055"})),
+            "§0x"
+        );
     }
 
     #[test]
@@ -532,18 +583,37 @@ mod tests {
     }
 
     #[test]
-    fn legacy_codes_in_text_are_stripped() {
-        // Otherwise server text could inject codes that override the styles
-        // this writer believes it has emitted.
+    fn text_codes_reach_the_client_that_applies_them() {
+        // A client reads the codes inside the text over the component's style,
+        // so they are what the MOTD renders in.
         let motd = json!({"text": "§cboom", "color": "green"});
-        assert_eq!(to_legacy_text(&motd), "§aboom");
-        assert_eq!(to_plain_text(&motd), "boom");
+        assert_eq!(to_legacy_text(&motd), "§a§cboom");
 
-        // BungeeCord's RGB extension goes too, as does a stray `§`.
+        // Vanilla has no `§x` code: it is swallowed, and the six codes behind
+        // it are applied, so this MOTD renders dark purple even though its
+        // style says green.
         let motd = json!({"text": "§x§F§F§5§5§5§5hi", "color": "green"});
-        assert_eq!(to_legacy_text(&motd), "§ahi");
-        let motd = json!({"text": "50§ off"});
-        assert_eq!(to_legacy_text(&motd), "50 off");
+        assert_eq!(to_legacy_text(&motd), "§a§x§F§F§5§5§5§5hi");
+
+        // A `§` that starts no code is not styling, so it stays as it is.
+        assert_eq!(to_legacy_text(&json!({"text": "50§ off"})), "50§ off");
+
+        // Plain text is what the client shows, so the codes go with the rest
+        // of the styling. A `§` swallows the character after it even when it
+        // starts no code, as the client reads it as formatting either way.
+        assert_eq!(to_plain_text(&json!({"text": "§cboom"})), "boom");
+        assert_eq!(to_plain_text(&json!({"text": "a§zb"})), "ab");
+        assert_eq!(to_plain_text(&json!({"text": "50§ off"})), "50off");
+        assert_eq!(to_plain_text(&json!({"text": "tail§"})), "tail");
+    }
+
+    #[test]
+    fn text_codes_do_not_leak_into_the_next_run() {
+        // The `§l` inside the first run's text stays on in the client, and the
+        // child overrides no flag, so the next run resets and restates its
+        // color instead of trusting the state the writer had reached.
+        let motd = json!({"text": "§lA", "extra": [{"text": "B", "color": "green"}]});
+        assert_eq!(to_legacy_text(&motd), "§lA§r§aB");
     }
 
     #[test]
