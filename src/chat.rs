@@ -1,11 +1,13 @@
 //! Chat-component → legacy-text conversion.
 //!
-//! [`StatusResponse::description`](crate::StatusResponse::description) stays
-//! raw JSON because a MOTD is either a plain string or a Chat-component object
-//! (`{"text": …}`, `{"extra": […]}`). [`to_legacy_text`] renders both shapes
-//! into the `§`-coded legacy format understood by server lists, MOTD tooling
-//! and plain logs (see <https://minecraft.wiki/w/Text_component_format>);
-//! [`to_plain_text`] drops the styling instead.
+//! A MOTD arrives as either a plain string or a Chat-component object
+//! (`{"text": …}`, `{"extra": […]}`), and both render into the `§`-coded legacy
+//! format understood by server lists, MOTD tooling and plain logs (see
+//! <https://minecraft.wiki/w/Text_component_format>). That is what
+//! [`to_legacy_text`] does, and it is applied to
+//! [`StatusResponse::description`](crate::StatusResponse::description) as it
+//! deserializes, so the field already holds the text a client draws;
+//! [`to_plain_text`] renders a component with the styling dropped instead.
 //!
 //! Supported:
 //!
@@ -30,15 +32,31 @@
 //! `translate` is rendered best-effort from `fallback` or the `with`
 //! arguments, since the real text lives in the client's language files.
 
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 // ─── Conversion ──────────────────────────────────────────────────────────────
 
+/// Deserialize a status `description` into legacy `§`-coded text.
+///
+/// Wired into [`StatusResponse::description`](crate::StatusResponse::description)
+/// through `#[serde(deserialize_with = …)]`, so both shapes a server may send —
+/// a plain string and a Chat-component object — arrive as the text a client
+/// draws. Never fails, like [`to_legacy_text`] itself.
+pub(crate) fn deserialize_description<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let component = Value::deserialize(deserializer)?;
+    Ok(to_legacy_text(&component))
+}
+
 /// Convert a Chat component into legacy `§`-coded text.
 ///
 /// Never fails: shapes and fields the legacy format cannot express are
-/// skipped, so this is safe to call on a raw server response. Typical use is
-/// `to_legacy_text(&result.status.description)`.
+/// skipped, so this is safe to call on a raw server response. Applied to
+/// [`StatusResponse::description`](crate::StatusResponse::description) during
+/// deserialization, so the common case needs no call at all.
 ///
 /// # Example
 ///

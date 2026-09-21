@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lite_mc_ping::{PingOptions, ServerAddress, chat, ping};
+use lite_mc_ping::{PingOptions, ServerAddress, ping};
 
 #[tokio::main]
 async fn main() {
@@ -66,12 +66,8 @@ fn print_result(address: &ServerAddress, result: &lite_mc_ping::PingResult, meas
         s.version.name, s.version.protocol
     );
     println!("players:     {}/{}", s.players.online, s.players.max);
-    let motd = chat::to_plain_text(&s.description);
-    println!("motd:        {motd}");
-    let styled = chat::to_legacy_text(&s.description);
-    if styled != motd {
-        println!("motd (§):    {styled}");
-    }
+    // Already legacy `§`-coded text, whatever shape the server sent.
+    println!("motd:        {}", s.description);
     if let Some(favicon) = &s.favicon {
         println!("favicon:     {} bytes (base64)", favicon.len());
     }

@@ -31,9 +31,12 @@ fn assert_sane_status(result: &PingResult) {
     let status = &result.status;
     assert!(!status.version.name.is_empty(), "empty version name");
     assert!(status.players.max > 0, "player max should be positive");
+    // `description` is typed as the legacy text, so what is worth checking is
+    // that the conversion left nothing of the component behind.
     assert!(
-        status.description.is_string() || status.description.is_object(),
-        "unexpected description shape"
+        !status.description.contains('{') && !status.description.contains("\"text\""),
+        "description still looks like raw JSON: {:?}",
+        status.description
     );
 }
 

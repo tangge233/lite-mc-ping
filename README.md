@@ -25,11 +25,12 @@ Server → Client: Pong         (0x01) same timestamp          [optional]
   latency `None` while the status is still returned.
 - **Typed response** — status JSON deserializes into `StatusResponse` (version,
   players, player sample, description, favicon, chat flags).
-- **MOTD conversion** — `chat::to_legacy_text` renders the JSON Chat component into
-  `§`-coded legacy text (colors incl. `#rrggbb` downgrade, styles, nested `extra`),
-  `chat::to_plain_text` renders the same content unstyled. Shapes the legacy format
-  cannot express (`score`/`selector`/`nbt`/`keybind`, 1.21.9+ `object` sprites) are
-  skipped instead of failing.
+- **MOTD conversion** — `StatusResponse::description` arrives as `§`-coded legacy text
+  (colors incl. `#rrggbb` downgrade, styles, nested `extra`), whichever of the two
+  shapes the server sent: a plain string or a JSON Chat component. `chat::to_legacy_text`
+  renders any component the same way, `chat::to_plain_text` renders it unstyled. Shapes
+  the legacy format cannot express (`score`/`selector`/`nbt`/`keybind`, 1.21.9+ `object`
+  sprites) are skipped instead of failing.
 - **Tokio-native async** — powered by `hickory-resolver` (DNS), `varint` (VarInt codec)
   and `serde_json`.
 
@@ -45,7 +46,7 @@ Requires Rust 1.85+ (edition 2024) and a tokio runtime.
 ## Usage
 
 ```rust
-use lite_mc_ping::{chat, ping, PingOptions, ServerAddress};
+use lite_mc_ping::{ping, PingOptions, ServerAddress};
 
 #[tokio::main]
 async fn main() {
@@ -56,11 +57,9 @@ async fn main() {
     };
     let result = ping(&address, &options).await.unwrap();
 
-    let motd = chat::to_plain_text(&result.status.description);
-    println!("{} / {} online — {motd}", result.status.players.online,
-             result.status.players.max);
-    let styled = chat::to_legacy_text(&result.status.description);
-    println!("motd: {styled}");
+    // Already `§`-coded, colors and styles included.
+    println!("{} / {} online — {}", result.status.players.online,
+             result.status.players.max, result.status.description);
     if let Some(latency) = result.latency {
         println!("latency: {} ms", latency.as_millis());
     }
@@ -81,8 +80,9 @@ default, so write `"play.example.com"` and not `"play.example.com:25565"` to let
 | `ServerAddress::{new, without_port}` | Explicit port (never SRV-resolved) vs. bare hostname |
 | `PingOptions` | `protocol_version` (default `-1`), `measure_latency`, `timeout`, `max_frame_size`, `use_srv` |
 | `PingResult` / `StatusResponse` | Parsed response and (optional) RTT |
-| `chat::to_legacy_text(&description)` | JSON Chat component → `§`-coded legacy text |
-| `chat::to_plain_text(&description)` | Same content, styling dropped |
+| `StatusResponse::description` | MOTD as `§`-coded legacy text, from either shape the server sent |
+| `chat::to_legacy_text(&component)` | JSON Chat component → `§`-coded legacy text |
+| `chat::to_plain_text(&component)` | Same content, styling dropped |
 
 ## Example CLI
 
@@ -96,7 +96,8 @@ $ cargo run --example ping -- --latency play.hypixel.net
 | --- | --- |
 | Modern (1.7+) protocol only | Legacy ≤1.6 ping, proxying and mod-list parsing are out of scope |
 | `varint` crate, unsigned methods only | Its signed methods are protobuf **zigzag**, not Minecraft's two's-complement VarInt (protocol `-1` → `FF FF FF FF 0F`). The frame-length prefix — the only VarInt read from the async stream — uses a 5-byte-capped loop, as the crate is `std::io`-only |
-| Lenient typed JSON | Unknown fields ignored, optional fields defaulted; `description` stays `serde_json::Value` (string or Chat-component object), and `chat` converts both shapes |
+| Lenient typed JSON | Unknown fields ignored, optional fields defaulted. `description` is the exception to "typed": a Chat-component object would have to be modelled fully to be typed, and a shape it does not know would lose the whole status, so the field is rendered into legacy text instead — a shape the legacy format cannot express contributes no text rather than failing |
+| `description` as legacy text | The MOTD is the one field a caller almost always wants to display, and both shapes a server may send (a plain string or a Chat component) collapse to the same `§`-coded text a client draws, so the conversion happens in `Deserialize` and the field needs no follow-up call. Serializing writes the legacy text back as a plain string, which deserializes to itself |
 | Stateful legacy output | `§` codes persist until changed and a style can only be cleared by `§r`, so the writer tracks the state a client is in and emits a reset only when an attribute has to be dropped. A color code clears the flags as well (only `§l` and friends turn attributes on), so a color change restates the flags it keeps, and a run whose text carries codes of its own leaves that state unknowable, so the next run resets and restates its whole style |
 | Text codes pass through | Codes embedded in a component's text (`"§cred"`, `"§x§F§F§5§5§5§5hi"`) are written to the legacy text as they are, because a client applies them over the component's style — stripping them would repaint the MOTD (`#FF5555` → `dark_purple`). `to_plain_text` does drop them, since a client shows the text without them |
 | Hex colors downgraded | `#rrggbb` maps to the nearest of the 16 legacy colors, since the format carries no 24-bit color; the BungeeCord `§x§r§r§g§g§b§b` extension is not used, as vanilla clients drop the unknown `§x` pair and read the hex digits behind it as codes |

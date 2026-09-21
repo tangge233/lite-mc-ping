@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(status.version.protocol, 769);
         assert_eq!(status.players.max, 100);
         assert_eq!(status.players.online, 2);
-        assert_eq!(status.description, serde_json::json!({"text": "Hello"}));
+        assert_eq!(status.description, "Hello");
     }
 
     #[test]
@@ -317,11 +317,25 @@ mod tests {
         std::io::Write::write_all(&mut body, json).unwrap();
 
         let status = parse_status_frame(&body.into_inner()).unwrap();
-        assert_eq!(status.description, serde_json::json!("Plain motd"));
+        assert_eq!(status.description, "Plain motd");
         // Missing optional fields default.
         assert_eq!(status.favicon, None);
         assert_eq!(status.enforces_secure_chat, None);
         assert_eq!(status.previews_chat, None);
+    }
+
+    /// A component description arrives as the legacy text a client draws, codes
+    /// and all, so a server list can render it without converting anything.
+    #[test]
+    fn parse_status_frame_renders_component_description() {
+        let json = br#"{"version":{"name":"1.21.4","protocol":769},"players":{"max":100,"online":2},"description":{"text":"Hi","color":"gold","extra":[{"text":" there","color":"gold","bold":true}]}}"#;
+        let mut body = Cursor::new(Vec::new());
+        body.write_unsigned_varint_32(0x00).unwrap();
+        body.write_unsigned_varint_32(json.len() as u32).unwrap();
+        std::io::Write::write_all(&mut body, json).unwrap();
+
+        let status = parse_status_frame(&body.into_inner()).unwrap();
+        assert_eq!(status.description, "§6Hi§l there");
     }
 
     #[test]

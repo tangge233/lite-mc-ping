@@ -198,11 +198,20 @@ pub struct StatusResponse {
     pub version: Version,
     #[serde(default)]
     pub players: Players,
-    /// The MOTD. Either a plain string or a Chat-component object
-    /// (`{"text": "..."}` or `{"extra": [...]}`), so it is kept as raw JSON;
-    /// [`crate::chat::to_legacy_text`] converts it to `§`-coded legacy text
-    /// and [`crate::chat::to_plain_text`] to plain text.
-    pub description: serde_json::Value,
+    /// The MOTD as legacy `§`-coded text.
+    ///
+    /// A server sends it either as a plain string or as a Chat-component object
+    /// (`{"text": …}` or `{"extra": […]}`); [`crate::chat::to_legacy_text`]
+    /// renders both as the field deserializes, so this is the text a client
+    /// draws — colors and styles included, ready for a server list to display.
+    /// Shapes the legacy format cannot express contribute no text instead of
+    /// failing the parse, so a malformed component cannot lose the whole
+    /// status.
+    ///
+    /// Serializing writes the legacy text back as a plain string, which
+    /// deserializes to itself.
+    #[serde(deserialize_with = "crate::chat::deserialize_description")]
+    pub description: String,
     #[serde(default)]
     pub favicon: Option<String>,
     #[serde(default, rename = "enforcesSecureChat")]
@@ -357,6 +366,27 @@ mod tests {
         ] {
             assert!(input.parse::<ServerAddress>().is_err(), "{input}");
         }
+    }
+
+    /// The legacy text is what that field round trips as: serializing cannot
+    /// resurrect the component it was rendered from, and the plain string it
+    /// writes deserializes to the same text.
+    #[test]
+    fn description_round_trips_as_legacy_text() {
+        let json = serde_json::json!({
+            "version": {"name": "1.21.4", "protocol": 769},
+            "players": {"max": 10, "online": 1},
+            "description": {"text": "Hi", "color": "gold", "bold": true},
+        });
+        let status: StatusResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(status.description, "§6§lHi");
+
+        let encoded = serde_json::to_value(&status).unwrap();
+        assert_eq!(encoded["description"], serde_json::json!("§6§lHi"));
+        assert_eq!(
+            serde_json::from_value::<StatusResponse>(encoded).unwrap(),
+            status
+        );
     }
 
     #[test]

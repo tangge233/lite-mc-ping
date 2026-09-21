@@ -23,10 +23,11 @@
 //! * **Optional latency** — set [`PingOptions::measure_latency`] to perform
 //!   the extra ping/pong round trip; the RTT is returned in
 //!   [`PingResult::latency`].
-//! * **MOTD conversion** — [`chat::to_legacy_text`] renders the JSON Chat
-//!   component (colors, styles, `extra` children, 1.21.9+ object sprites
-//!   skipped) into `§`-coded legacy text, [`chat::to_plain_text`] into plain
-//!   text.
+//! * **MOTD conversion** — [`StatusResponse::description`] is rendered into
+//!   `§`-coded legacy text as the status deserializes, whether the server sent
+//!   a plain string or a Chat-component object ([`chat::to_legacy_text`] does
+//!   the same to any component, [`chat::to_plain_text`] drops the styling
+//!   instead).
 //! * **Async API** on tokio.
 //!
 //! # Example
@@ -44,6 +45,8 @@
 //!     let result = ping(&address, &options).await.unwrap();
 //!     println!("{} players online (max {})",
 //!         result.status.players.online, result.status.players.max);
+//!     // Already `§`-coded, colors and styles included.
+//!     println!("motd: {}", result.status.description);
 //!     if let Some(latency) = result.latency {
 //!         println!("latency: {latency:?}");
 //!     }
@@ -63,10 +66,11 @@
 //!   decode through the crate.
 //! * Status JSON deserializes into typed structs ([`StatusResponse`]),
 //!   leniently: unknown fields are ignored and optional fields default.
-//!   `description` remains `serde_json::Value` — it is either a plain string
-//!   or a Chat-component object, and both shapes are accepted by
-//!   [`chat::to_legacy_text`] / [`chat::to_plain_text`] rather than forcing a
-//!   typed component through which malformed server JSON would fail.
+//!   `description` is the exception to "typed": a server sends it as a plain
+//!   string or as a Chat-component object, and typing it as a component would
+//!   lose the whole status on malformed server JSON. It is rendered into
+//!   `§`-coded legacy text as it deserializes ([`chat::to_legacy_text`]), so
+//!   the field holds what a client draws whatever shape arrived.
 
 pub mod chat;
 mod error;
