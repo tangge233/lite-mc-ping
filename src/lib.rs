@@ -21,6 +21,10 @@
 //! * **Optional latency** — set [`PingOptions::measure_latency`] to perform
 //!   the extra ping/pong round trip; the RTT is returned in
 //!   [`PingResult::latency`].
+//! * **MOTD conversion** — [`chat::to_legacy_text`] renders the JSON Chat
+//!   component (colors, styles, `extra` children, 1.21.9+ object sprites
+//!   skipped) into `§`-coded legacy text, [`chat::to_plain_text`] into plain
+//!   text.
 //! * **Async API** on tokio.
 //!
 //! # Example
@@ -58,8 +62,11 @@
 //! * Status JSON deserializes into typed structs ([`StatusResponse`]),
 //!   leniently: unknown fields are ignored and optional fields default.
 //!   `description` remains `serde_json::Value` — it is either a plain string
-//!   or a Chat-component object.
+//!   or a Chat-component object, and both shapes are accepted by
+//!   [`chat::to_legacy_text`] / [`chat::to_plain_text`] rather than forcing a
+//!   typed component through which malformed server JSON would fail.
 
+pub mod chat;
 mod error;
 mod models;
 mod protocol;

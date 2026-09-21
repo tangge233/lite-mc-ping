@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lite_mc_ping::{PingOptions, ServerAddress, ping};
+use lite_mc_ping::{PingOptions, ServerAddress, chat, ping};
 
 #[tokio::main]
 async fn main() {
@@ -66,25 +66,17 @@ fn print_result(address: &ServerAddress, result: &lite_mc_ping::PingResult) {
         s.version.name, s.version.protocol
     );
     println!("players:     {}/{}", s.players.online, s.players.max);
-    println!("motd:        {}", motd_text(&s.description));
+    let motd = chat::to_plain_text(&s.description);
+    println!("motd:        {motd}");
+    let styled = chat::to_legacy_text(&s.description);
+    if styled != motd {
+        println!("motd (§):    {styled}");
+    }
     if let Some(favicon) = &s.favicon {
         println!("favicon:     {} bytes (base64)", favicon.len());
     }
     match result.latency {
         Some(latency) => println!("latency:     {latency:?}"),
         None => println!("latency:     not measured (use --latency)"),
-    }
-}
-
-/// Render the description as plain text when possible: a bare string, or the
-/// `text` field of a Chat component; otherwise fall back to compact JSON.
-fn motd_text(description: &serde_json::Value) -> String {
-    match description {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Object(map) => match map.get("text") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            _ => serde_json::to_string(description).unwrap_or_default(),
-        },
-        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }

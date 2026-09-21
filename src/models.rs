@@ -131,7 +131,9 @@ pub struct StatusResponse {
     #[serde(default)]
     pub players: Players,
     /// The MOTD. Either a plain string or a Chat-component object
-    /// (`{"text": "..."}` or `{"extra": [...]}`), so it is kept as raw JSON.
+    /// (`{"text": "..."}` or `{"extra": [...]}`), so it is kept as raw JSON;
+    /// [`crate::chat::to_legacy_text`] converts it to `§`-coded legacy text
+    /// and [`crate::chat::to_plain_text`] to plain text.
     pub description: serde_json::Value,
     #[serde(default)]
     pub favicon: Option<String>,

@@ -22,6 +22,11 @@ Server → Client: Pong         (0x01) same timestamp          [optional]
   and reports the RTT in `PingResult::latency`.
 - **Typed response** — status JSON deserializes into `StatusResponse` (version,
   players, player sample, description, favicon, chat flags).
+- **MOTD conversion** — `chat::to_legacy_text` renders the JSON Chat component into
+  `§`-coded legacy text (colors incl. `#rrggbb` downgrade, styles, nested `extra`),
+  `chat::to_plain_text` renders the same content unstyled. Shapes the legacy format
+  cannot express (`score`/`selector`/`nbt`/`keybind`, 1.21.9+ `object` sprites) are
+  skipped instead of failing.
 - **Tokio-native async** — powered by `hickory-resolver` (DNS), `varint` (VarInt codec)
   and `serde_json`.
 
@@ -37,7 +42,7 @@ Requires Rust 1.85+ (edition 2024) and a tokio runtime.
 ## Usage
 
 ```rust
-use lite_mc_ping::{ping, PingOptions, ServerAddress};
+use lite_mc_ping::{chat, ping, PingOptions, ServerAddress};
 
 #[tokio::main]
 async fn main() {
@@ -48,8 +53,11 @@ async fn main() {
     };
     let result = ping(&address, &options).await.unwrap();
 
-    println!("{} / {} online — {}", result.status.players.online,
-             result.status.players.max, result.status.description);
+    let motd = chat::to_plain_text(&result.status.description);
+    println!("{} / {} online — {motd}", result.status.players.online,
+             result.status.players.max);
+    let styled = chat::to_legacy_text(&result.status.description);
+    println!("motd: {styled}");
     if let Some(latency) = result.latency {
         println!("latency: {} ms", latency.as_millis());
     }
@@ -67,6 +75,8 @@ defaults to `25565`.
 | `resolve_server_address(host, port)` | SRV lookup with direct-connect fallback |
 | `PingOptions` | `protocol_version` (default `-1`), `measure_latency`, `timeout`, `max_frame_size`, `use_srv` |
 | `PingResult` / `StatusResponse` | Parsed response and (optional) RTT |
+| `chat::to_legacy_text(&description)` | JSON Chat component → `§`-coded legacy text |
+| `chat::to_plain_text(&description)` | Same content, styling dropped |
 
 ## Example CLI
 
@@ -80,16 +90,20 @@ $ cargo run --example ping -- --latency play.hypixel.net
 | --- | --- |
 | Modern (1.7+) protocol only | Legacy ≤1.6 ping, proxying and mod-list parsing are out of scope |
 | `varint` crate, unsigned methods only | Its signed methods are protobuf **zigzag**, not Minecraft's two's-complement VarInt (protocol `-1` → `FF FF FF FF 0F`). The frame-length prefix — the only VarInt read from the async stream — uses a 5-byte-capped loop, as the crate is `std::io`-only |
-| Lenient typed JSON | Unknown fields ignored, optional fields defaulted; `description` stays `serde_json::Value` (string or Chat-component object) |
+| Lenient typed JSON | Unknown fields ignored, optional fields defaulted; `description` stays `serde_json::Value` (string or Chat-component object), and `chat` converts both shapes |
+| Stateful legacy output | `§` codes persist until changed and a style can only be cleared by `§r`, so the writer tracks the state a client is in and emits a reset only when an attribute has to be dropped |
+| Hex colors downgraded | `#rrggbb` maps to the nearest of the 16 legacy colors (vanilla behavior), not the BungeeCord `§x§r§r§g§g§b§b` extension, which vanilla clients do not understand |
+| `translate` best-effort | The real text lives in the client's language files, so `fallback` is used when present, otherwise the `with` arguments joined by a space |
 | Reused DNS resolver | One lazily built process-wide `hickory_resolver::Resolver` is shared across pings; it is `Clone + Sync` and its `moka` answer cache is shared on clone |
 | RFC 2782 SRV selection | Weighted-random within the lowest-priority group; uniform when all weights are 0; root (`"."`) targets skipped |
 | Timeout + size caps | Whole operation bounded by `PingOptions::timeout`; frames capped at `max_frame_size` (1 MiB default) |
 
 ## Tests
 
-`cargo test` runs unit tests for VarInt/packet encoding and RFC 2782 selection,
-plus end-to-end integration tests against an in-process fake server (status
-fields, latency on/off, timeout, frame-size limit, plain-string MOTD).
+`cargo test` runs unit tests for VarInt/packet encoding, response parsing, RFC 2782
+SRV selection and Chat-component conversion, plus network integration tests that
+ping the real servers in `tests/integration.rs` (SRV resolution, status fields,
+latency on/off, timeout).
 
 ## License
 
