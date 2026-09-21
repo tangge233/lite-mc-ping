@@ -15,9 +15,10 @@ Server → Client: Pong         (0x01) same timestamp          [optional]
 ## Features
 
 - **SRV resolution** — `_minecraft._tcp.<host>` via `hickory-resolver`, with RFC 2782
-  weighted-random target selection. On lookup failure (or for IP literals) the ping
-  falls back to the direct address; the handshake keeps the *original* hostname
-  (Mojang-client behavior).
+  weighted-random target selection. Looked up only when the address leaves the port open:
+  an explicit port (`play.example.com:25566`) or an IP literal is used as-is, and a failed
+  or empty lookup falls back to the address as given. When an SRV record is used, the
+  handshake keeps the *original* hostname (Mojang-client behavior).
 - **Optional latency** — `PingOptions::measure_latency` runs the ping/pong round trip
   and reports the RTT in `PingResult::latency`.
 - **Typed response** — status JSON deserializes into `StatusResponse` (version,
@@ -46,7 +47,7 @@ use lite_mc_ping::{chat, ping, PingOptions, ServerAddress};
 
 #[tokio::main]
 async fn main() {
-    let address: ServerAddress = "play.example.com:25565".parse().unwrap();
+    let address: ServerAddress = "play.example.com".parse().unwrap();
     let options = PingOptions {
         measure_latency: true,
         ..Default::default()
@@ -64,15 +65,18 @@ async fn main() {
 }
 ```
 
-`ServerAddress` parses `"host"`, `"host:port"` and `"[::1]:port"`; the port
-defaults to `25565`.
+`ServerAddress` parses `"host"`, `"host:port"`, `"[::1]"` and `"[::1]:port"`; a
+port that is given is used as-is, including `":25565"`. An omitted port is only a
+default, so write `"play.example.com"` and not `"play.example.com:25565"` to let an
+`_minecraft._tcp` SRV record route the ping.
 
 ### API
 
 | Item | Description |
 | --- | --- |
 | `ping(&ServerAddress, &PingOptions)` | Full status exchange; measures latency when enabled |
-| `resolve_server_address(host, port)` | SRV lookup with direct-connect fallback |
+| `resolve_server_address(&ServerAddress)` | SRV lookup with fallback to the address as given |
+| `ServerAddress::{new, without_port}` | Explicit port (never SRV-resolved) vs. bare hostname |
 | `PingOptions` | `protocol_version` (default `-1`), `measure_latency`, `timeout`, `max_frame_size`, `use_srv` |
 | `PingResult` / `StatusResponse` | Parsed response and (optional) RTT |
 | `chat::to_legacy_text(&description)` | JSON Chat component → `§`-coded legacy text |
@@ -94,6 +98,7 @@ $ cargo run --example ping -- --latency play.hypixel.net
 | Stateful legacy output | `§` codes persist until changed and a style can only be cleared by `§r`, so the writer tracks the state a client is in and emits a reset only when an attribute has to be dropped |
 | Hex colors downgraded | `#rrggbb` maps to the nearest of the 16 legacy colors (vanilla behavior), not the BungeeCord `§x§r§r§g§g§b§b` extension, which vanilla clients do not understand |
 | `translate` best-effort | The real text lives in the client's language files, so `fallback` is used when present, otherwise the `with` arguments joined by a space |
+| SRV only fills in what was left out | Only a bare hostname leaves the port open, so an explicit port or IP literal is used as-is — a record could only contradict the caller. `PingOptions::use_srv = false` disables the lookup entirely |
 | Reused DNS resolver | One lazily built process-wide `hickory_resolver::Resolver` is shared across pings; it is `Clone + Sync` and its `moka` answer cache is shared on clone |
 | RFC 2782 SRV selection | Weighted-random within the lowest-priority group; uniform when all weights are 0; root (`"."`) targets skipped |
 | Timeout + size caps | Whole operation bounded by `PingOptions::timeout`; frames capped at `max_frame_size` (1 MiB default) |

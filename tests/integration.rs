@@ -7,15 +7,17 @@
 use std::time::Duration;
 
 use lite_mc_ping::{
-    Error, PingOptions, PingResult, ServerAddress, ping, resolve_server_address,
+    DEFAULT_PORT, Error, PingOptions, PingResult, ServerAddress, ping, resolve_server_address,
     resolve_server_address_with_options,
 };
 
 /// Servers exercised by the network tests, in the order they are pinged.
 const SERVERS: &[&str] = &["mc233.cn", "mc.saltwood.top", "mc.hypixel.net"];
 
+/// Address without an explicit port, so `_minecraft._tcp` records are allowed
+/// to redirect the ping — the whole point of the SRV tests.
 fn address(host: &str) -> ServerAddress {
-    ServerAddress::new(host, 25565)
+    ServerAddress::without_port(host)
 }
 
 fn options() -> PingOptions {
@@ -40,7 +42,7 @@ fn assert_sane_status(result: &PingResult) {
 #[tokio::test]
 async fn pings_all_servers_in_sequence() {
     for host in SERVERS {
-        let resolved = resolve_server_address(host, 25565)
+        let resolved = resolve_server_address(&address(host))
             .await
             .unwrap_or_else(|e| panic!("{host}: resolve failed: {e}"));
         assert!(resolved.port > 0, "{host}: resolved port must be valid");
@@ -74,12 +76,12 @@ async fn srv_disabled_connects_to_original_address() {
         ..options()
     };
 
-    let resolved = resolve_server_address_with_options(host, 25565, &opts)
+    let resolved = resolve_server_address_with_options(&address(host), &opts)
         .await
         .unwrap();
     assert!(!resolved.used_srv);
     assert_eq!(resolved.host, host);
-    assert_eq!(resolved.port, 25565);
+    assert_eq!(resolved.port, DEFAULT_PORT);
 
     let result = ping(&address(host), &opts).await.unwrap();
     assert_sane_status(&result);

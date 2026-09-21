@@ -14,10 +14,12 @@
 //! # Features
 //!
 //! * **SRV resolution** — `_minecraft._tcp.<host>` via `hickory-resolver`,
-//!   with RFC 2782 weighted-random target selection. On lookup failure (or for
-//!   IP literals) it falls back to the direct address. When an SRV record is
-//!   used, the handshake still carries the *original* hostname, as Mojang's
-//!   client does, so servers can virtual-host on it.
+//!   with RFC 2782 weighted-random target selection. Looked up only when the
+//!   address leaves the port open: an explicit port (`"play.example.com:25566"`)
+//!   or an IP literal is used as-is. A failed lookup, or no usable record,
+//!   falls back to the address as given. When an SRV record is used, the
+//!   handshake still carries the *original* hostname, as Mojang's client does,
+//!   so servers can virtual-host on it.
 //! * **Optional latency** — set [`PingOptions::measure_latency`] to perform
 //!   the extra ping/pong round trip; the RTT is returned in
 //!   [`PingResult::latency`].
@@ -72,7 +74,6 @@ mod models;
 mod protocol;
 mod srv;
 
-use std::net::IpAddr;
 use std::time::Instant;
 
 use tokio::io::{AsyncWriteExt, BufStream};
@@ -85,34 +86,36 @@ pub use models::{
     StatusResponse, Version,
 };
 
-/// Resolve the effective address to connect to, applying SRV lookup when
-/// applicable (host is not an IP literal and [`PingOptions::use_srv`]).
+/// Resolve the effective address to connect to, applying SRV lookup when the
+/// address leaves room for it.
+///
+/// An address with an explicit port, or an IP literal, is already complete and
+/// is returned as-is — SRV could only contradict it. A bare hostname is looked
+/// up as `_minecraft._tcp.<host>` and, when a usable record exists, resolved
+/// to the record's target and port. With no record (or with
+/// [`PingOptions::use_srv`] off) the host is used on
+/// [`ServerAddress::effective_port`].
 ///
 /// The result is also used internally by [`ping`]; the port may come from the
 /// SRV record while the handshake keeps the original hostname.
-pub async fn resolve_server_address(host: &str, port: u16) -> Result<ResolvedAddress, Error> {
-    resolve_server_address_with_options(host, port, &PingOptions::default()).await
+pub async fn resolve_server_address(address: &ServerAddress) -> Result<ResolvedAddress, Error> {
+    resolve_server_address_with_options(address, &PingOptions::default()).await
 }
 
 /// Same as [`resolve_server_address`] but honoring the caller's
 /// [`PingOptions::use_srv`] flag.
 pub async fn resolve_server_address_with_options(
-    host: &str,
-    port: u16,
+    address: &ServerAddress,
     options: &PingOptions,
 ) -> Result<ResolvedAddress, Error> {
-    if !options.use_srv || host.parse::<IpAddr>().is_ok() {
-        return Ok(ResolvedAddress {
-            host: host.to_string(),
-            port,
-            used_srv: false,
-        });
+    if !options.use_srv || !address.allows_srv() {
+        return Ok(direct(address));
     }
 
     // Reuse the process-wide resolver (shared DNS cache); on init failure or
     // when there is no usable SRV record, connect directly.
     if let Some(resolver) = srv::shared_resolver()
-        && let Some(record) = srv::resolve_srv(resolver, host).await?
+        && let Some(record) = srv::resolve_srv(resolver, &address.host).await?
     {
         return Ok(ResolvedAddress {
             host: record.target,
@@ -121,19 +124,23 @@ pub async fn resolve_server_address_with_options(
         });
     }
 
-    Ok(ResolvedAddress {
-        host: host.to_string(),
-        port,
+    Ok(direct(address))
+}
+
+/// The address as given, used whenever no SRV record redirects it.
+fn direct(address: &ServerAddress) -> ResolvedAddress {
+    ResolvedAddress {
+        host: address.host.clone(),
+        port: address.effective_port(),
         used_srv: false,
-    })
+    }
 }
 
 /// Ping a Minecraft Java server and (optionally) measure latency.
 ///
 /// The whole operation is bounded by [`PingOptions::timeout`].
 pub async fn ping(address: &ServerAddress, options: &PingOptions) -> Result<PingResult, Error> {
-    let resolved =
-        resolve_server_address_with_options(&address.host, address.port, options).await?;
+    let resolved = resolve_server_address_with_options(address, options).await?;
     timeout(
         options.timeout,
         ping_inner(&resolved, &address.host, options),
@@ -204,6 +211,17 @@ mod tests {
         let address = ServerAddress::new("127.0.0.1", 25565);
         let options = PingOptions::default();
         assert_send(ping(&address, &options));
-        assert_send(resolve_server_address(&address.host, address.port));
+        assert_send(resolve_server_address(&address));
+    }
+
+    /// An explicit port is an address in its own right: resolution must not
+    /// consult SRV, which could only contradict the caller. Runs no DNS.
+    #[tokio::test]
+    async fn explicit_port_is_used_as_given() {
+        let address: ServerAddress = "mc233.cn:1234".parse().unwrap();
+        let resolved = resolve_server_address(&address).await.unwrap();
+        assert_eq!(resolved.host, "mc233.cn");
+        assert_eq!(resolved.port, 1234);
+        assert!(!resolved.used_srv);
     }
 }

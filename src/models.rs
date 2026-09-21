@@ -10,25 +10,53 @@ use serde::{Deserialize, Serialize};
 /// Default Minecraft Java Edition port.
 pub const DEFAULT_PORT: u16 = 25565;
 
-/// A server to ping: hostname (or IP literal) plus port.
+/// A server to ping: hostname (or IP literal) plus an optional port.
 ///
-/// Parseable from `"host"`, `"host:port"` and `"[::1]:port"` forms via
-/// [`FromStr`]; bare strings default to [`DEFAULT_PORT`].
+/// Parseable from `"host"`, `"host:port"`, `"[::1]"` and `"[::1]:port"` forms
+/// via [`FromStr`].
+///
+/// A port that was given is used as-is, including `":25565"`, while an omitted
+/// port is a default that SRV resolution may replace with the port of the
+/// `_minecraft._tcp.<host>` record (see [`crate::resolve_server_address`]).
+/// Write `"play.example.com"` rather than `"play.example.com:25565"` to let an
+/// SRV record route the ping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerAddress {
-    /// Hostname or IP literal. Unvalidated; used verbatim in the handshake
-    /// and for the TCP connection.
+    /// Hostname or IP literal. Only the address syntax is checked here; name
+    /// resolution happens at connect time.
     pub host: String,
-    /// TCP port.
-    pub port: u16,
+    /// TCP port as given by the caller, or `None` when the input omitted it —
+    /// then [`ServerAddress::effective_port`] reports [`DEFAULT_PORT`].
+    pub port: Option<u16>,
 }
 
 impl ServerAddress {
+    /// Address with an explicit port: used as-is, never SRV-resolved.
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
             host: host.into(),
-            port,
+            port: Some(port),
         }
+    }
+
+    /// Address without a port: connects to [`DEFAULT_PORT`], or to the port of
+    /// the `_minecraft._tcp.<host>` SRV record when one exists.
+    pub fn without_port(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            port: None,
+        }
+    }
+
+    /// Port to connect to when no SRV record applies.
+    pub fn effective_port(&self) -> u16 {
+        self.port.unwrap_or(DEFAULT_PORT)
+    }
+
+    /// Whether SRV resolution may replace this address: only a bare hostname
+    /// leaves anything for a record to fill in.
+    pub(crate) fn allows_srv(&self) -> bool {
+        self.port.is_none() && self.host.parse::<IpAddr>().is_err()
     }
 }
 
@@ -41,38 +69,68 @@ impl FromStr for ServerAddress {
             return Err("empty address".into());
         }
         // Bracket form handles IPv6 explicitly: "[::1]:25565" or "[::1]".
-        let Some(rest) = s.strip_prefix('[') else {
-            // Bare string: an IP literal (e.g. "::1") → default port, or
-            // "host" / "host:port" — split on the last colon (hosts contain
-            // colons only in IPv6, already handled above).
-            if let Ok(ip) = s.parse::<IpAddr>() {
-                return Ok(ServerAddress::new(ip.to_string(), DEFAULT_PORT));
+        if let Some(rest) = s.strip_prefix('[') {
+            let (host, tail) = rest
+                .split_once(']')
+                .ok_or_else(|| format!("missing ']' in {s:?}"))?;
+            if host.is_empty() {
+                return Err(format!("missing host in {s:?}"));
             }
-            return match s.rsplit_once(':') {
-                Some((host, p)) if !host.is_empty() && !p.is_empty() => {
-                    let port = p.parse().map_err(|_| format!("invalid port {p:?}"))?;
-                    Ok(ServerAddress::new(host, port))
+            let port = match tail {
+                "" => None,
+                tail => {
+                    Some(parse_port(tail.strip_prefix(':').ok_or_else(|| {
+                        format!("unexpected {tail:?} after ']' in {s:?}")
+                    })?)?)
                 }
-                _ => Ok(ServerAddress::new(s, DEFAULT_PORT)),
             };
+            return Ok(ServerAddress {
+                host: host.into(),
+                port,
+            });
+        }
+        // A bare IP literal (notably IPv6, as in "::1") never carries a port.
+        if let Ok(ip) = s.parse::<IpAddr>() {
+            return Ok(ServerAddress::without_port(ip.to_string()));
+        }
+        // "host" or "host:port": whatever follows the last colon is the port,
+        // so a host still holding a colon is malformed — IPv6 needs brackets.
+        let (host, port) = match s.rsplit_once(':') {
+            Some((host, port)) => (host, Some(parse_port(port)?)),
+            None => (s, None),
         };
-        let (host, tail) = rest
-            .split_once(']')
-            .ok_or_else(|| format!("missing ']' in {s:?}"))?;
-        let port = match tail.strip_prefix(':') {
-            Some(p) if !p.is_empty() => p.parse().map_err(|_| format!("invalid port {p:?}"))?,
-            _ => DEFAULT_PORT,
-        };
-        Ok(ServerAddress::new(host, port))
+        if host.is_empty() {
+            return Err(format!("missing host in {s:?}"));
+        }
+        if host.contains(':') {
+            return Err(format!(
+                "invalid host {host:?} in {s:?}: write IPv6 literals in brackets"
+            ));
+        }
+        Ok(ServerAddress {
+            host: host.into(),
+            port,
+        })
     }
+}
+
+/// Parse a port number, rejecting empty, non-numeric and out-of-range values.
+fn parse_port(port: &str) -> Result<u16, String> {
+    port.parse().map_err(|_| format!("invalid port {port:?}"))
 }
 
 impl fmt::Display for ServerAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.host.parse::<Ipv6Addr>().is_ok() {
-            write!(f, "[{}]:{}", self.host, self.port)
+        // Formats as the address was given, so that parsing a displayed
+        // address yields the same one again. IPv6 literals are bracketed.
+        let (open, close) = if self.host.parse::<Ipv6Addr>().is_ok() {
+            ("[", "]")
         } else {
-            write!(f, "{}:{}", self.host, self.port)
+            ("", "")
+        };
+        match self.port {
+            Some(port) => write!(f, "{open}{}{close}:{port}", self.host),
+            None => write!(f, "{open}{}{close}", self.host),
         }
     }
 }
@@ -92,8 +150,9 @@ pub struct PingOptions {
     /// Maximum accepted frame size; guards against excessive declared lengths.
     pub max_frame_size: u32,
     /// Whether to attempt `_minecraft._tcp.<host>` SRV lookup. Never applied
-    /// to IP literals; on lookup failure the ping falls back to the direct
-    /// address.
+    /// to an IP literal or to an address with an explicit port, which are
+    /// already complete; on lookup failure the ping falls back to the address
+    /// as given.
     pub use_srv: bool,
 }
 
@@ -186,15 +245,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_host_only_defaults_port() {
+    fn parse_host_only_leaves_port_open() {
         let a: ServerAddress = "mc.example.com".parse().unwrap();
-        assert_eq!(a, ServerAddress::new("mc.example.com", DEFAULT_PORT));
+        assert_eq!(a, ServerAddress::without_port("mc.example.com"));
+        assert_eq!(a.port, None);
+        assert_eq!(a.effective_port(), DEFAULT_PORT);
     }
 
     #[test]
-    fn parse_host_port() {
+    fn parse_host_port_is_explicit() {
         let a: ServerAddress = "mc.example.com:25566".parse().unwrap();
         assert_eq!(a, ServerAddress::new("mc.example.com", 25566));
+        assert_eq!(a.port, Some(25566));
     }
 
     #[test]
@@ -202,23 +264,66 @@ mod tests {
         let a: ServerAddress = "[::1]:25565".parse().unwrap();
         assert_eq!(a, ServerAddress::new("::1", 25565));
         let b: ServerAddress = "[2001:db8::5]".parse().unwrap();
-        assert_eq!(b, ServerAddress::new("2001:db8::5", DEFAULT_PORT));
+        assert_eq!(b, ServerAddress::without_port("2001:db8::5"));
     }
 
     #[test]
     fn parse_bare_ipv6() {
         let a: ServerAddress = "::1".parse().unwrap();
-        assert_eq!(a, ServerAddress::new("::1", DEFAULT_PORT));
+        assert_eq!(a, ServerAddress::without_port("::1"));
     }
 
     #[test]
     fn display_formats_ipv6_with_brackets() {
-        let a = ServerAddress::new("::1", 25565);
-        assert_eq!(a.to_string(), "[::1]:25565");
+        assert_eq!(ServerAddress::new("::1", 25565).to_string(), "[::1]:25565");
+        assert_eq!(ServerAddress::without_port("::1").to_string(), "[::1]");
         assert_eq!(
             ServerAddress::new("mc.example.com", 25566).to_string(),
             "mc.example.com:25566"
         );
+    }
+
+    /// Displaying what was parsed — and not a defaulted port — keeps the SRV
+    /// decision intact across a round trip.
+    #[test]
+    fn display_round_trips() {
+        for input in [
+            "mc.example.com",
+            "mc.example.com:25566",
+            "[::1]",
+            "[::1]:25565",
+        ] {
+            let address: ServerAddress = input.parse().unwrap();
+            assert_eq!(address.to_string(), input);
+            assert_eq!(
+                address.to_string().parse::<ServerAddress>().unwrap(),
+                address
+            );
+        }
+    }
+
+    /// Only a bare hostname leaves the port open for SRV to fill in.
+    #[test]
+    fn srv_applies_only_to_bare_hostnames() {
+        for input in ["mc.example.com", "mc233.cn"] {
+            assert!(
+                input.parse::<ServerAddress>().unwrap().allows_srv(),
+                "{input}"
+            );
+        }
+        for input in [
+            "mc.example.com:25565",
+            "mc.example.com:25566",
+            "1.2.3.4",
+            "1.2.3.4:25565",
+            "[::1]",
+            "[::1]:25565",
+        ] {
+            assert!(
+                !input.parse::<ServerAddress>().unwrap().allows_srv(),
+                "{input}"
+            );
+        }
     }
 
     #[test]
@@ -226,6 +331,23 @@ mod tests {
         assert!("mc.example.com:port".parse::<ServerAddress>().is_err());
         assert!("[::1]:abc".parse::<ServerAddress>().is_err());
         assert!("".parse::<ServerAddress>().is_err());
+    }
+
+    /// Malformed addresses are reported rather than silently turning the port
+    /// into part of the hostname, which would fail later as a DNS error.
+    #[test]
+    fn malformed_addresses_are_rejected() {
+        for input in [
+            "mc.example.com:",
+            ":123",
+            "mc.example.com:70000",
+            "mc.example.com:25565:99",
+            "[::1]:",
+            "[::1]junk",
+            "[]",
+        ] {
+            assert!(input.parse::<ServerAddress>().is_err(), "{input}");
+        }
     }
 
     #[test]
