@@ -80,7 +80,7 @@ mod srv;
 
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, BufStream};
+use tokio::io::BufStream;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout_at};
 
@@ -89,6 +89,8 @@ pub use models::{
     DEFAULT_PORT, PingOptions, PingResult, PlayerSample, Players, ResolvedAddress, ServerAddress,
     StatusResponse, Version,
 };
+
+use crate::protocol::McProtocol;
 
 /// Resolve the effective address to connect to, applying SRV lookup when the
 /// address leaves room for it.
@@ -153,17 +155,13 @@ pub async fn ping(address: &ServerAddress, options: &PingOptions) -> Result<Ping
     )
     .await
     .map_err(|_| Error::Timeout(options.timeout))??;
-    timeout_at(
-        deadline,
-        ping_inner(&resolved, &address.host, options, deadline),
-    )
-    .await
-    .map_err(|_| Error::Timeout(options.timeout))?
+    timeout_at(deadline, ping_inner(&resolved, options, deadline))
+        .await
+        .map_err(|_| Error::Timeout(options.timeout))?
 }
 
 async fn ping_inner(
     resolved: &ResolvedAddress,
-    original_host: &str,
     options: &PingOptions,
     deadline: Instant,
 ) -> Result<PingResult, Error> {
@@ -176,32 +174,23 @@ async fn ping_inner(
     }
     // Connecting by hostname lets tokio resolve A/AAAA via the OS and try
     // every address in order, giving multi-address targets automatic failover.
-    let mut stream =
-        BufStream::new(TcpStream::connect((resolved.host.as_str(), resolved.port)).await?);
-    stream.get_ref().set_nodelay(true)?;
+    let tcp_socket = TcpStream::connect((resolved.host.as_str(), resolved.port)).await?;
+    tcp_socket.set_nodelay(true)?;
+    let stream = BufStream::new(tcp_socket);
 
-    // Handshake: carry the *original* hostname, connect to the SRV port.
-    stream
-        .write_all(&protocol::build_handshake(
-            options.protocol_version,
-            original_host,
-            resolved.port,
-        )?)
+    let mut mcp = McProtocol::new(stream, options.max_frame_size as usize);
+    mcp.write_handshake_frame(options.protocol_version, resolved)
         .await?;
-    stream.flush().await?;
 
-    stream.write_all(&protocol::build_status_request()?).await?;
-    stream.flush().await?;
-
-    let status_frame = protocol::read_frame(&mut stream, options.max_frame_size).await?;
-    let status = protocol::parse_status_frame(&status_frame)?;
+    mcp.write_status_request().await?;
+    let status = mcp.read_status_response().await?;
 
     // The status is in hand: from here on nothing may fail the ping. The extra
     // round trip only gets the time left on the clock, and any failure — a
     // server that hangs up, ignores the ping, or outlives the deadline — costs
     // the latency instead of the result.
     let latency = if options.measure_latency {
-        match timeout_at(deadline, ping_round_trip(&mut stream, options)).await {
+        match timeout_at(deadline, ping_round_trip(&mut mcp)).await {
             Ok(Ok(rtt)) => Some(rtt),
             Ok(Err(_)) | Err(_) => None,
         }
@@ -213,22 +202,20 @@ async fn ping_inner(
 }
 
 /// The extra ping/pong exchange (packet id `0x01`), returning the round trip.
-async fn ping_round_trip(
-    stream: &mut BufStream<TcpStream>,
-    options: &PingOptions,
-) -> Result<Duration, Error> {
-    stream
-        .write_all(&protocol::build_ping_packet(protocol::now_nanos())?)
-        .await?;
-    stream.flush().await?;
+async fn ping_round_trip(mcp: &mut McProtocol<BufStream<TcpStream>>) -> Result<Duration, Error> {
     let start = Instant::now();
-    let pong_frame = protocol::read_frame(stream, options.max_frame_size).await?;
-    protocol::parse_pong_frame(&pong_frame)?;
+    mcp.write_ping_packet(protocol::now_nanos()).await?;
+    let _ = mcp.read_pong_response().await?;
     Ok(start.elapsed())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use varint_rs::{VarintReader, VarintWriter};
+
     use super::*;
 
     /// Guards against accidentally making the public futures `!Send` (e.g. by
@@ -257,8 +244,41 @@ mod tests {
     /// Status response the fake server answers with.
     const STATUS_JSON: &str = r#"{"version":{"name":"1.21.4","protocol":769},"players":{"max":10,"online":1},"description":"Hi"}"#;
 
-    /// Largest frame the fake server accepts.
-    const FRAME_LIMIT: u32 = 1024 * 1024;
+    /// VarInt as Minecraft encodes it: seven bits per byte, little-endian groups.
+    fn varint_bytes(value: u32) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::with_capacity(5));
+        buf.write_u32_varint(value).unwrap();
+        buf.into_inner()
+    }
+
+    /// Read one frame from the client: VarInt length, then the payload.
+    ///
+    /// Same shape as `McProtocol::read_frame`: buffer up to five bytes, decode
+    /// the length through `varint-rs`, then read what is left of the payload.
+    async fn read_frame(socket: &mut TcpStream) -> Vec<u8> {
+        let mut header = Vec::with_capacity(5);
+        let read = socket.read_buf(&mut header).await.unwrap();
+        let mut cur = Cursor::new(&header[..read]);
+        let len = cur.read_u32_varint().unwrap() as usize;
+        let header_len = cur.position() as usize;
+
+        // The header read may already hold the start of the payload.
+        let mut payload = header[header_len..read].to_vec();
+        let mut rest = vec![0u8; len - payload.len()];
+        socket.read_exact(&mut rest).await.unwrap();
+        payload.extend_from_slice(&rest);
+        payload
+    }
+
+    /// A status response carrying `json`: packet id `0x00`, then the string.
+    fn status_frame(json: &str) -> Vec<u8> {
+        let mut payload = vec![0x00];
+        payload.extend(varint_bytes(json.len() as u32));
+        payload.extend_from_slice(json.as_bytes());
+        let mut out = varint_bytes(payload.len() as u32);
+        out.extend(payload);
+        out
+    }
 
     /// Serve one status exchange on a loopback port and return that port.
     ///
@@ -271,20 +291,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            protocol::read_frame(&mut socket, FRAME_LIMIT)
-                .await
-                .unwrap(); // handshake
-            protocol::read_frame(&mut socket, FRAME_LIMIT)
-                .await
-                .unwrap(); // status request
-            socket
-                .write_all(&protocol::build_status_frame(STATUS_JSON).unwrap())
-                .await
-                .unwrap();
+            read_frame(&mut socket).await; // handshake
+            read_frame(&mut socket).await; // status request
+            socket.write_all(&status_frame(STATUS_JSON)).await.unwrap();
             socket.flush().await.unwrap();
-            protocol::read_frame(&mut socket, FRAME_LIMIT)
-                .await
-                .unwrap(); // ping
+            read_frame(&mut socket).await; // ping
             if hang_up {
                 return; // dropping the socket closes it
             }

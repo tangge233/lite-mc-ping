@@ -29,7 +29,7 @@ pub enum Error {
 
     /// The incoming frame exceeds the configured [`crate::PingOptions::max_frame_size`].
     #[error("frame too large: {len} bytes (limit {limit})")]
-    FrameTooLarge { len: u32, limit: u32 },
+    FrameTooLarge { len: usize, limit: usize },
 
     /// The status JSON payload could not be parsed.
     #[error("JSON error: {0}")]
